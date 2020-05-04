@@ -401,4 +401,5 @@ def cast_to_image(tensor):
 
 
 if __name__ == "__main__":
+    print(os.getcwd())
     main()

@@ -194,7 +194,7 @@ def main():
     Load input images and poses
     """
 
-    data = np.load("cache/tiny_nerf_data.npz")
+    data = np.load("/home/nerfteam/data/tiny_nerf_data.npz")
 
     # Images
     images = data["images"]
