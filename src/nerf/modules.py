@@ -2,7 +2,7 @@ import torch
 
 ### TODO: Add model
 from nerf import cumprod_exclusive
-
+import torchsearchsorted
 
 class PositionalEncoding(torch.nn.Module):
     """Apply positional encoding to the input.
@@ -51,6 +51,7 @@ class VolumeRenderer(torch.nn.Module):
         self.val_radiance_field_noise_std = val_radiance_field_noise_std
         self.val_white_background = val_white_background
         one_e_10 = torch.tensor([1e10])
+        one_e_10.requires_grad = False
         self.register_buffer('one_e_10', one_e_10)
 
 
@@ -115,7 +116,7 @@ class RaySampleInterval(torch.nn.Module):
         point_intervals = torch.linspace(
             0.0, 1.0, point_amount
         )[None, :]
-
+        point_intervals.requires_grad = False
         self.register_buffer('point_intervals', point_intervals)
 
     def forward(self, bounds):
@@ -141,4 +142,68 @@ class RaySampleInterval(torch.nn.Module):
             )
             point_intervals = lower + (upper - lower) * t_rand
         return point_intervals
+
+
+class SamplePDF(torch.nn.Module):
+    def __init__(self, num_samples):
+        super(SamplePDF, self).__init__()
+        self.num_samples = num_samples
+        u = torch.linspace(0.0, 1.0, steps=self.num_samples)
+        u.requires_grad = False
+        self.register_buffer("u", u)
+
+    def forward(self, point_interval, weights, perturb):
+        points_on_rays_mid = 0.5 * (point_interval[..., 1:] + point_interval[..., :-1])
+        interval_samples = self.sample_pdf(
+            points_on_rays_mid,
+            weights[..., 1:-1],
+            self.u,
+            det=(perturb == 0.0)).detach()
+
+        point_interval, _ = torch.sort(
+            torch.cat((point_interval, interval_samples), dim=-1), dim=-1
+        )
+        return point_interval
+
+    def sample_pdf(self, bins, weights, u, det=False):
+        r"""sample_pdf function from another concurrent pytorch implementation
+        by yenchenlin (https://github.com/yenchenlin/nerf-pytorch).
+        """
+
+        weights = weights + 1e-5
+        pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
+        cdf = torch.cumsum(pdf, dim=-1)
+        cdf = torch.cat(
+            [torch.zeros_like(cdf[..., :1]), cdf], dim=-1
+        )  # (batchsize, len(bins))
+
+        # Take uniform samples
+        if det:
+            u = u.expand(list(cdf.shape[:-1]) + [self.num_samples])
+        else:
+            u = torch.rand(
+                list(cdf.shape[:-1]) + [self.num_samples],
+                dtype=weights.dtype,
+                device=weights.device,
+            )
+
+        # Invert CDF
+        u = u.contiguous()
+        cdf = cdf.contiguous()
+        inds = torchsearchsorted.searchsorted(cdf, u, side="right")
+        below = torch.max(torch.zeros_like(inds - 1), inds - 1)
+        above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
+        inds_g = torch.stack((below, above), dim=-1)  # (batchsize, num_samples, 2)
+
+        matched_shape = (inds_g.shape[0], inds_g.shape[1], cdf.shape[-1])
+        cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
+        bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
+
+        denom = cdf_g[..., 1] - cdf_g[..., 0]
+        denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
+        t = (u - cdf_g[..., 0]) / denom
+        samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
+
+        return samples
+
 

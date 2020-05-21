@@ -14,7 +14,7 @@ def mse2psnr(mse):
     # For numerical stability, avoid a zero mse loss.
     if mse == 0:
         mse = 1e-5
-    return -10.0 * math.log10(mse)
+    return -10.0 * torch.log10(mse)
 
 
 def get_minibatches(inputs: torch.Tensor, chunksize: Optional[int] = 1024 * 8):

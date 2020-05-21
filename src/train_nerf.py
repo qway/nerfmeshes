@@ -1,3 +1,4 @@
+import collections
 import os
 
 import argparse
@@ -5,21 +6,14 @@ import torch
 import torchvision
 import yaml
 from pathlib import Path
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.core.lightning import LightningModule
 from torch.utils.data import DataLoader
 from typing import Tuple
 
 from nerf import models, CfgNode, mse2psnr, sample_pdf_2, BlenderRayDataset, \
-    BlenderImageDataset, VolumeRenderer, RaySampleInterval, sample_pdf
+    BlenderImageDataset, VolumeRenderer, RaySampleInterval, sample_pdf, SamplePDF
 import numpy as np
-
-
-def fix_seed(seed):
-    # Seed experiment for repeatability
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-
 
 def load_config(configargs):
     cfg = None
@@ -27,6 +21,16 @@ def load_config(configargs):
         cfg_dict = yaml.load(f, Loader=yaml.FullLoader)
         cfg = CfgNode(cfg_dict)
     return cfg
+
+def flatten_dict(d, parent_key='', sep='_'):
+    items = []
+    for k, v in d.items():
+        new_key = parent_key + sep + k if parent_key else k
+        if isinstance(v, collections.MutableMapping):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)
 
 
 def cast_to_image(tensor):
@@ -72,7 +76,6 @@ def intervals_to_raypoints(point_intervals, ray_direction, ray_origin):
 def create_intervals(
     ray_origin, ray_direction, bounds, point_amount=64, lindisp=True, perturb=False
 ):
-    num_rays = ray_origin.shape[0]
     near, far = bounds[..., 0, None], bounds[..., 1, None]
 
     point_intervals = torch.linspace(
@@ -100,25 +103,22 @@ def create_intervals(
         point_intervals = lower + (upper - lower) * t_rand
     return point_intervals
 
-
-def sample_from_weighted_interval(point_interval, weights, num_fine, perturb, device):
-    points_on_rays_mid = 0.5 * (point_interval[..., 1:] + point_interval[..., :-1])
-    interval_samples = sample_pdf_2(
-        points_on_rays_mid,
-        weights[..., 1:-1],
-        num_fine,
-        det=(perturb == 0.0)).detach()
-
-    point_interval, _ = torch.sort(
-        torch.cat((point_interval, interval_samples), dim=-1), dim=-1
-    )
-    return point_interval
+def get_ray_batch(ray_batch):
+    """ Removes all unecessary dimensions from a ray batch. """
+    ray_origins, ray_directions, bounds, ray_targets = ray_batch
+    ray_origins = ray_origins.view(-1, 3)
+    ray_directions = ray_directions.view(-1, 3)
+    bounds = bounds.view(-1, 2)
+    ray_targets = ray_targets.view(-1, 4)
+    return ray_origins, ray_directions, bounds, ray_targets
 
 
 class NeRFModel(LightningModule):
     def __init__(self, cfg, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
+        self.hparams = flatten_dict(cfg, sep=".")
+        self.logger.experiment.add_text(cfg.dump(), 0)
         self.dataset_basepath = Path(cfg.dataset.basedir)
 
         self.loss = torch.nn.MSELoss()
@@ -131,6 +131,7 @@ class NeRFModel(LightningModule):
             cfg.nerf.validation.white_background,
         )
         self.sample_interval = RaySampleInterval(cfg.nerf.train.num_coarse)
+        self.sample_pdf = SamplePDF(cfg.nerf.train.num_fine)
 
     def forward(self, x):
         """ Does a prediction for a batch of rays.
@@ -167,9 +168,8 @@ class NeRFModel(LightningModule):
         )
         rgb_fine, disp_fine, acc_fine = None, None, None
         if nerf_cfg.num_fine > 0 and self.model_fine:
-            ray_intervals = sample_from_weighted_interval(
-                ray_intervals, weights, nerf_cfg.num_fine, nerf_cfg.perturb, self.device
-            )
+            ray_intervals = self.sample_pdf(
+                ray_intervals, weights, nerf_cfg.perturb)
             raypoints = intervals_to_raypoints(
                 ray_intervals, ray_directions, ray_origins
             )
@@ -185,7 +185,8 @@ class NeRFModel(LightningModule):
         return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
 
     def training_step(self, ray_batch, batch_idx):
-        ray_origins, ray_directions, bounds, ray_targets = ray_batch
+        ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(ray_batch)
+
 
         rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
             (ray_origins, ray_directions, bounds)
@@ -200,12 +201,12 @@ class NeRFModel(LightningModule):
             fine_loss = None
             loss = coarse_loss
 
-        psnr = mse2psnr(loss.item())
+        psnr = mse2psnr(loss)
 
         log_vals = {
             "train/loss": loss.item(),
             "train/coarse_loss": coarse_loss.item(),
-            "train/psnr": psnr,
+            "train/psnr": psnr.item(),
         }
         if rgb_fine is not None:
             log_vals["train/fine_loss"] = fine_loss.item()
@@ -218,7 +219,7 @@ class NeRFModel(LightningModule):
         return output
 
     def validation_step(self, image_ray_batch, batch_idx):
-        ray_origins, ray_directions, bounds, ray_targets = image_ray_batch
+        ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(image_ray_batch)
 
         # Manual batching, since images can be bigger than memory allows
         batchsize = self.cfg.nerf.validation.chunksize
@@ -259,15 +260,10 @@ class NeRFModel(LightningModule):
             rgb_fine = None
             loss = coarse_loss
 
-        psnr = mse2psnr(loss.item())
+        psnr = mse2psnr(loss)
 
-        log_vals = {
-            "validation/loss": loss.item(),
-            "validation/coarse_loss": coarse_loss.item(),
-            "validation/psnr": psnr,
-        }
-        if rgb_fine is not None:
-            log_vals["validation/fine_loss"] = fine_loss.item()
+
+
 
         self.logger.experiment.add_image(
             "validation/rgb_coarse",
@@ -293,9 +289,24 @@ class NeRFModel(LightningModule):
         )
         output = {
             "val_loss": loss,
-            "log": log_vals,
+            "validation/loss": loss,
+            "validation/coarse_loss": coarse_loss,
+            "validation/psnr": psnr,
         }
+        if rgb_fine is not None:
+            output["validation/fine_loss"] = fine_loss
         return output
+
+    def validation_epoch_end(self, outputs):
+        log_vals = {}
+        for k in outputs[0].keys():
+            log_vals[k] = torch.stack([x[k] for x in outputs]).mean()
+        val_loss_mean = log_vals['val_loss']
+        del log_vals['val_loss']
+        for k,v in log_vals.items():
+            log_vals[k] = v.item()
+
+        return {'val_loss': val_loss_mean, "log": log_vals}
 
     def train_dataloader(self):
         self.train_dataset = BlenderRayDataset(
@@ -304,8 +315,8 @@ class NeRFModel(LightningModule):
             cfg.dataset.near,
             cfg.dataset.far,
             shuffle=True,
-            white_background=self.cfg.nerf.train.white_background
-            # stop=5, # Debug by loading only small part of the dataset
+            white_background=self.cfg.nerf.train.white_background,
+            #stop=5, # Debug by loading only small part of the dataset
         )
 
         train_dataloader = DataLoader(self.train_dataset, batch_size=None)
@@ -335,7 +346,7 @@ if __name__ == "__main__":
         "--config", type=str, required=True, help="Path to (.yml) config file."
     )
     parser.add_argument(
-        "--gpus", type=int, nargs="*", default=None, help="Gpus that should be used(Use instead of CUDA_VISIBLE_DEVICES)"
+        "--gpus", type=int, default=1, help="Amount of Gpus that should be used(In most cases leave at 1)"
     )
     parser.add_argument(
         "--load-checkpoint",
@@ -350,14 +361,18 @@ if __name__ == "__main__":
 
     # # (Optional:) enable this to track autograd issues when debugging
     # torch.autograd.set_detect_anomaly(True)
-    fix_seed(cfg.experiment.randomseed)
+    seed_everything(cfg.experiment.randomseed)
 
     trainer = Trainer(
-        gpus=list(configargs.gpus),
-        val_check_interval=0.25,
-        default_root_dir="../../logs",
-        profiler=True,
-        max_epochs=20,
+        gpus=configargs.gpus,
+        val_check_interval=cfg.experiment.validate_every,
+        default_root_dir="../logs",
+        #profiler=True, # Activate for very simple profiling
+        #fast_dev_run=True, # Activate when debugging
+        max_steps=cfg.experiment.train_iters,
+        log_gpu_memory=True,
+        deterministic=True,
+        accumulate_grad_batches=2
     )
     model = NeRFModel(cfg)
 
