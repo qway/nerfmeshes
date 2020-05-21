@@ -62,6 +62,14 @@ version = "2.1.0.post1"
 
 [[package]]
 category = "main"
+description = "Clean single-source support for Python 3 and 2"
+name = "future"
+optional = false
+python-versions = ">=2.6, !=3.0.*, !=3.1.*, !=3.2.*"
+version = "0.18.2"
+
+[[package]]
+category = "main"
 description = "Google Authentication Library"
 name = "google-auth"
 optional = false
@@ -368,6 +376,22 @@ six = ">=1.5"
 
 [[package]]
 category = "main"
+description = "PyTorch Lightning is the lightweight PyTorch wrapper for ML researchers. Scale your models. Write less boilerplate."
+name = "pytorch-lightning"
+optional = false
+python-versions = ">=3.6"
+version = "0.7.6"
+
+[package.dependencies]
+future = ">=0.17.1"
+numpy = ">=1.16.4"
+pyyaml = ">=3.13"
+tensorboard = ">=1.14"
+torch = ">=1.1"
+tqdm = ">=4.41.0"
+
+[[package]]
+category = "main"
 description = "PyWavelets, wavelet transform module"
 name = "pywavelets"
 optional = false
@@ -530,6 +554,21 @@ version = "1.4.0"
 
 [[package]]
 category = "main"
+description = ""
+name = "torchsearchsorted"
+optional = false
+python-versions = "*"
+version = "1.1"
+
+[package.extras]
+test = ["pytest"]
+
+[package.source]
+reference = "f6ace753e77a9ac0e091bdedc8287212aff61655"
+type = "git"
+url = "https://github.com/aliutkus/torchsearchsorted"
+[[package]]
+category = "main"
 description = "image and video datasets and models for torch deep learning"
 name = "torchvision"
 optional = false
@@ -625,7 +664,7 @@ docs = ["sphinx", "jaraco.packaging (>=3.2)", "rst.linker (>=1.9)"]
 testing = ["jaraco.itertools", "func-timeout"]
 
 [metadata]
-content-hash = "557540e621bea76ffa8489947cfc9538cb0c781007faedf02149c7d201dcc480"
+content-hash = "7e6b808f31e85c4a25ae167904f1ed4ee2d1076de28d8b1c97054f11db5b2691"
 python-versions = "^3.7"
 
 [metadata.files]
@@ -660,6 +699,9 @@ freetype-py = [
     {file = "freetype_py-2.1.0.post1-py2.py3-none-manylinux1_x86_64.whl", hash = "sha256:84e9879bb5f87dc1eb5342230a13e7ea10f520aa06a4d1c7b298208bbac08110"},
     {file = "freetype_py-2.1.0.post1-py2.py3-none-win32.whl", hash = "sha256:d179759b245bb01f5603acd071aea99d97d993a28c4e71fdc4bd7530c49931f9"},
     {file = "freetype_py-2.1.0.post1-py2.py3-none-win_amd64.whl", hash = "sha256:eda77d57acdfe74d1cf3958b5fb5aaea21a2866f4e8d7632c06123d6014f9e0c"},
+]
+future = [
+    {file = "future-0.18.2.tar.gz", hash = "sha256:b1bead90b70cf6ec3f0710ae53a525360fa360d306a86583adc6bf83a4db537d"},
 ]
 google-auth = [
     {file = "google-auth-1.15.0.tar.gz", hash = "sha256:fbf25fee328c0828ef293459d9c649ef84ee44c0b932bb999d19df0ead1b40cf"},
@@ -926,6 +968,10 @@ python-dateutil = [
     {file = "python-dateutil-2.8.1.tar.gz", hash = "sha256:73ebfe9dbf22e832286dafa60473e4cd239f8592f699aa5adaf10050e6e1823c"},
     {file = "python_dateutil-2.8.1-py2.py3-none-any.whl", hash = "sha256:75bb3f31ea686f1197762692a9ee6a7550b59fc6ca3a1f4b5d7e32fb98e2da2a"},
 ]
+pytorch-lightning = [
+    {file = "pytorch-lightning-0.7.6.tar.gz", hash = "sha256:2708bdd578d430a387c7d8bff654c59ec871ca0f5af1abf46c7404232caed104"},
+    {file = "pytorch_lightning-0.7.6-py3-none-any.whl", hash = "sha256:f53a0740488b7d5ac06c73af3d4142cf6f17196dff8d48b6c3661697d8fc2ea6"},
+]
 pywavelets = [
     {file = "PyWavelets-1.1.1-cp35-cp35m-macosx_10_6_intel.whl", hash = "sha256:35959c041ec014648575085a97b498eafbbaa824f86f6e4a59bfdef8a3fe6308"},
     {file = "PyWavelets-1.1.1-cp35-cp35m-manylinux1_i686.whl", hash = "sha256:55e39ec848ceec13c9fa1598253ae9dd5c31d09dfd48059462860d2b908fb224"},
@@ -1041,6 +1087,7 @@ torch = [
     {file = "torch-1.4.0-cp38-cp38-manylinux1_x86_64.whl", hash = "sha256:504915c6bc6051ba6a4c2a43c446463dff04411e352f1e26fe13debeae431778"},
     {file = "torch-1.4.0-cp38-none-macosx_10_9_x86_64.whl", hash = "sha256:d7b34a78f021935ad727a3bede56a8a8d4fda0b0272314a04c5f6890bbe7bb29"},
 ]
+torchsearchsorted = []
 torchvision = [
     {file = "torchvision-0.5.0-cp27-cp27m-macosx_10_7_x86_64.whl", hash = "sha256:35e9483858cf8a38debc647c74741605c5c12448d314aa96961082380aadf7e5"},
     {file = "torchvision-0.5.0-cp27-cp27m-manylinux1_x86_64.whl", hash = "sha256:323500d349d8d91ce2662de41212e8eb1845c68dbf5d4f215ca1e94c7f20723b"},

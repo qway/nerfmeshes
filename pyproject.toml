@@ -20,6 +20,8 @@ pyrender = "^0.1.40"
 pycollada = "^0.7.1"
 scipy = "^1.4.1"
 scikit-image = "^0.17.2"
+torchsearchsorted = {git = "https://github.com/aliutkus/torchsearchsorted" }
+pytorch-lightning = "^0.7.6"
 
 [tool.poetry.dev-dependencies]
 
