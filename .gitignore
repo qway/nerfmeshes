@@ -133,5 +133,7 @@ dmypy.json
 models/*
 data/*
 .idea
-src/nerf/cache/
-src/nerf/logs/
+**/cache/
+**/*logs/
+.venv/
+

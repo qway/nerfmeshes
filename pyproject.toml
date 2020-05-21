@@ -1,8 +1,8 @@
 [tool.poetry]
-name = "nerfmeshes"
+name = "cchiv-nerf"
 version = "0.1.0"
 description = "A mesh reconstruction tool build around Neural Radiance Fields"
-authors = ["Benedikt Wiberg <benedikt.wiberg@gmail.com>"]
+authors = ["Cristian Chivrga <cchivriga@gmail.com>"]
 license = "MIT"
 
 [tool.poetry.dependencies]
@@ -15,8 +15,11 @@ torchvision = "^0.5.0"
 tqdm = "^4.46.0"
 opencv-python-headless = "^4.2.0"
 matplotlib = "^3.2.1"
-torchsearchsorted = { git = "https://github.com/aliutkus/torchsearchsorted"}
-torch = "1.4.0"
+trimesh = "^3.6.38"
+pyrender = "^0.1.40"
+pycollada = "^0.7.1"
+scipy = "^1.4.1"
+scikit-image = "^0.17.2"
 
 [tool.poetry.dev-dependencies]
 
