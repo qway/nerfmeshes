@@ -2,12 +2,16 @@ import collections
 import os
 
 import argparse
+import time
+
 import torch
 import torchvision
 import yaml
 from pathlib import Path
 from pytorch_lightning import Trainer, seed_everything
+from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.core.lightning import LightningModule
+from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 from typing import Tuple
 
@@ -114,11 +118,10 @@ def get_ray_batch(ray_batch):
 
 
 class NeRFModel(LightningModule):
-    def __init__(self, cfg, *args, **kwargs):
+    def __init__(self, cfg, hparams=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.cfg = cfg
         self.hparams = flatten_dict(cfg, sep=".")
-        self.logger.experiment.add_text(cfg.dump(), 0)
         self.dataset_basepath = Path(cfg.dataset.basedir)
 
         self.loss = torch.nn.MSELoss()
@@ -183,6 +186,12 @@ class NeRFModel(LightningModule):
             )
 
         return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
+
+    def sample_points(self, points, rays):
+        model = self.model_coarse
+        if self.model_fine:
+            model = self.model_fine
+        return model(points, rays)
 
     def training_step(self, ray_batch, batch_idx):
         ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(ray_batch)
@@ -363,14 +372,30 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     seed_everything(cfg.experiment.randomseed)
 
+    logdir = Path("../logs") / (cfg.experiment.id + time.strftime("_%y-%m-%d-%H:%M"))
+    os.makedirs(logdir)
+    with open(os.path.join(logdir, "config.yml"), "w") as f:
+        f.write(cfg.dump())  # cfg, f, default_flow_style=False)
+    logger = TensorBoardLogger(logdir)
+    logger.experiment.add_text("config", cfg.dump(),0)
+    checkpoint_callback = ModelCheckpoint(
+        filepath=logdir,
+        save_top_k=True,
+        verbose=True,
+        monitor='val_loss',
+        mode='min',
+        prefix=''
+    )
     trainer = Trainer(
         gpus=configargs.gpus,
         val_check_interval=cfg.experiment.validate_every,
         default_root_dir="../logs",
+        logger=logger,
+        checkpoint_callback=checkpoint_callback,
         #profiler=True, # Activate for very simple profiling
         #fast_dev_run=True, # Activate when debugging
         max_steps=cfg.experiment.train_iters,
-        log_gpu_memory=True,
+        #log_gpu_memory=True,
         deterministic=True,
         accumulate_grad_batches=2
     )

@@ -16,13 +16,12 @@ from nerf import get_minibatches
 
 from nerf import (
     CfgNode,
-    load_blender_data,
-    load_llff_data,
     models,
     get_embedding_function,
     predict_and_render_radiance,
-    volume_render_radiance_field
 )
+from train_nerf import NeRFModel
+
 
 def export_obj(vertices, triangles, diffuse, normals, filename):
     """
@@ -62,7 +61,7 @@ def main():
         help = "Checkpoint / pre-trained model to evaluate.",
     )
     parser.add_argument(
-        "--save-dir", type = str, help = "Save mesh to this directory, if specified."
+        "--save-dir", type = str, help = "Save mesh to this directory, if specified.", default="."
     )
 
     parser.add_argument('--cache-mesh', dest = 'cache_mesh', action = 'store_true')
@@ -70,84 +69,38 @@ def main():
     parser.set_defaults(cache_mesh = True)
 
     configargs = parser.parse_args()
-
-    # Read config file.
     cfg, model_name = None, None
     with open(configargs.config, "r") as f:
-        cfg_dict = yaml.load(f, Loader = yaml.FullLoader)
+        cfg_dict = yaml.load(f, Loader=yaml.FullLoader)
         cfg, model_name = CfgNode(cfg_dict), Path(f.name).stem
 
-    # Device on which to run.
-    device = "cpu" if not torch.cuda.is_available() else "cuda"
+    if torch.cuda.is_available():
+        device = torch.cuda.current_device()
+    else:
+        device = 'cpu'
 
-    encode_position_fn = get_embedding_function(
-        num_encoding_functions = cfg.models.coarse.num_encoding_fn_xyz,
-        include_input = cfg.models.coarse.include_input_xyz,
-        log_sampling = cfg.models.coarse.log_sampling_xyz,
-    )
-
-    encode_direction_fn = None
-    if cfg.models.coarse.use_viewdirs:
-        encode_direction_fn = get_embedding_function(
-            num_encoding_functions = cfg.models.coarse.num_encoding_fn_dir,
-            include_input = cfg.models.coarse.include_input_dir,
-            log_sampling = cfg.models.coarse.log_sampling_dir,
-        )
-
-    # Initialize a coarse resolution model.
-    model_coarse = getattr(models, cfg.models.coarse.type)(
-        num_encoding_fn_xyz = cfg.models.coarse.num_encoding_fn_xyz,
-        num_encoding_fn_dir = cfg.models.coarse.num_encoding_fn_dir,
-        include_input_xyz = cfg.models.coarse.include_input_xyz,
-        include_input_dir = cfg.models.coarse.include_input_dir,
-        use_viewdirs = cfg.models.coarse.use_viewdirs,
-    ).to(device)
-
-    # If a fine-resolution model is specified, initialize it.
-    model_fine = None
-    if hasattr(cfg.models, "fine"):
-        model_fine = getattr(models, cfg.models.fine.type)(
-            num_encoding_fn_xyz = cfg.models.fine.num_encoding_fn_xyz,
-            num_encoding_fn_dir = cfg.models.fine.num_encoding_fn_dir,
-            include_input_xyz = cfg.models.fine.include_input_xyz,
-            include_input_dir = cfg.models.fine.include_input_dir,
-            use_viewdirs = cfg.models.fine.use_viewdirs,
-        ).to(device)
-
-    checkpoint = torch.load(configargs.checkpoint)
-    model_coarse.load_state_dict(checkpoint["model_coarse_state_dict"])
-    if checkpoint["model_fine_state_dict"]:
-        try:
-            model_fine.load_state_dict(checkpoint["model_fine_state_dict"])
-        except:
-            print(
-                "The checkpoint has a fine-level model, but it could "
-                "not be loaded (possibly due to a mismatched config file."
-            )
-
-    model_coarse.eval()
-    if model_fine:
-        model_fine.eval()
+    model = NeRFModel.load_from_checkpoint(configargs.checkpoint, cfg=cfg)
+    model.eval()
+    model.to(device)
 
     # Mesh Extraction
-    N = 128
+    N = 256
     iso_value = 32
     batch_size = 1024
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
     distance_length = 0.001
     distance_threshold = 0.001
-    view_disparity = 0.2
     limit = 1.2
+    view_disparity = 2*limit/N
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
     adjust_normals = False
     specific_view = False
-    plane_near = 0
-    plane_far = 6
 
     vertices, triangles, normals, diffuse = None, None, None, None
     if configargs.cache_mesh:
+        print("Generating mesh geometry...")
         query_pts = np.stack(np.meshgrid(t, t, t), -1).astype(np.float32)
         pts = torch.from_numpy(query_pts)
         dimension = pts.shape[-1]
@@ -157,14 +110,8 @@ def main():
 
         density = np.zeros((pts_flat.shape[0]))
         for idx, batch in enumerate(tqdm(pts_flat_batch)):
-            batch = batch.cuda()
-
-            embedded = encode_position_fn(batch)
-            if encode_direction_fn is not None:
-                embedded_dirs = encode_direction_fn(batch)
-                embedded = torch.cat((embedded, embedded_dirs), dim = -1)
-
-            result_batch = model_fine(embedded)
+            batch = batch.to(device)
+            result_batch = model.sample_points(batch, batch) # Reuse positions as fake rays
 
             # Extracting the density
             density[idx * batch_size: (idx + 1) * batch_size] = result_batch[..., 3].cpu().detach().numpy()
@@ -177,26 +124,6 @@ def main():
         vertices = np.ascontiguousarray(vertices)
         normals = np.ascontiguousarray(normals)
 
-        # Query directly without specific-views
-        if specific_view:
-            targets = torch.from_numpy(vertices) / N * 2 * limit - limit
-            targets = targets[:, [1, 0, 2]]
-            stride = 512
-            diffuse = np.zeros((len(targets), 3))
-            for idx in range(0, len(targets) // stride + 1):
-                offset1 = stride * idx
-                offset2 = np.minimum(stride * (idx + 1), len(vertices))
-                batch = targets[offset1:offset2].to(device)
-
-                embedded = encode_position_fn(batch)
-                if encode_direction_fn is not None:
-                    embedded_dirs = encode_direction_fn(batch)
-                    embedded = torch.cat((embedded, embedded_dirs), dim = -1)
-
-                result_batch = model_fine(embedded)
-
-                # Query the whole diffuse map
-                diffuse[offset1:offset2] = result_batch[..., :3].cpu().detach().numpy()
 
         if adjust_normals:
             # Re-adjust normals based on NERF's density grid
@@ -248,60 +175,65 @@ def main():
                     normals[index] *= (-1)
 
         np.save(os.path.join(configargs.save_dir, "mesh_cache.npy"), (vertices, triangles, normals))
-        print("Saved successfully")
+        print("Mesh geometry saved successfully")
     else:
+        print("Loading mesh geometry...")
         vertices, triangles, normals = np.load(os.path.join(configargs.save_dir, "mesh_cache.npy"), allow_pickle = True)
 
-    # Extracting the diffuse color
-    # Ray targets
+    print("Generating mesh texture...")
+
     targets = torch.from_numpy(vertices) / N * 2 * limit - limit
-    # Swap x-axis and y-axis
+    inv_normals = -torch.from_numpy(normals)
+    # Reorder coordinates
     targets = targets[:, [1, 0, 2]]
+    inv_normals = inv_normals[:, [1, 0, 2]]
 
-    # Ray directions
-    directions = torch.from_numpy(normals)
+    # Query directly without specific-views
+    if specific_view:
+        diffuse = np.zeros((len(targets), 3))
+        for idx in tqdm(range(0, len(targets) // batch_size + 1)):
+            offset1 = batch_size * idx
+            offset2 = np.minimum(batch_size * (idx + 1), len(vertices))
+            pos_batch = targets[offset1:offset2].to(device)
+            normal_batch = inv_normals[offset1:offset2].to(device)
 
-    # Ray directions swapped based on Marching Cubes algorithm
-    directions = directions[:, [1, 0, 2]]
+            result_batch = model.sample_points(pos_batch, normal_batch)
 
-    # Ray origins
-    # ray_origins = length * directions
-    ray_origins = targets + view_disparity * directions
+            #Current color hack since the network does not normalize colors
+            result_batch = torch.sigmoid(result_batch[..., :3])*255
+            # Query the whole diffuse map
+            diffuse[offset1:offset2] = result_batch[..., :3].cpu().detach().numpy()
+    if not specific_view:
 
-    # Ray directions
-    ray_directions_loose = targets  - ray_origins
-    ray_directions = ray_directions_loose / ray_directions_loose.norm(dim = 1).unsqueeze(1)
+        # Move ray origins slightly out of the mesh
+        # ray_origins = length * directions
+        ray_origins = targets - view_disparity * inv_normals
 
-    near = plane_near * torch.ones_like(ray_directions[..., :1])
-    far = plane_far * torch.ones_like(ray_directions[..., :1])
+        # Careful, do not set the near plane to zero!
+        ray_bounds = (
+            torch.tensor([0.001, 2*view_disparity], dtype=ray_origins.dtype)
+                .view(1, 2)
+                .expand(batch_size, 2)
+        ).to(device)
 
-    # Generating ray batches
-    rays = torch.cat((ray_origins, ray_directions, near, far), dim = -1)
-    if cfg.nerf.use_viewdirs:
-        # Provide ray directions as input
-        view_dirs = ray_directions / ray_directions.norm(p = 2, dim = -1).unsqueeze(-1)
-        rays = torch.cat((rays, view_dirs.view((-1, 3))), dim = -1)
+        pred = []
+        for idx in tqdm(range(0, len(targets) // batch_size + 1)):
+            offset1 = batch_size * idx
+            offset2 = np.minimum(batch_size * (idx + 1), len(vertices))
+            pos_batch = ray_origins[offset1:offset2].to(device)
+            normal_batch = inv_normals[offset1:offset2].to(device)
+            ray_bounds_batch = ray_bounds[:offset2-offset1]
+            _, _, _, diffuse, _, _ = model((pos_batch,normal_batch, ray_bounds_batch))
 
-    ray_batches = get_minibatches(rays, chunksize = 2048)
+            pred.append(diffuse.cpu().detach())
 
-    pred = []
-    for ray_batch in ray_batches:
-        # move to appropriate device
-        ray_batch = ray_batch.to(device)
-
-        _, _, _, diffuse, _, _ = predict_and_render_radiance(ray_batch, model_coarse, model_fine, cfg,
-                mode = "validation",
-                encode_position_fn = encode_position_fn,
-                encode_direction_fn = encode_direction_fn,
-        )
-
-        pred.append(diffuse.cpu().detach())
-
-    # Query the whole diffuse map
-    diffuse = torch.cat(pred, dim = 0).numpy()
+        # Query the whole diffuse map
+        diffuse = torch.cat(pred, dim = 0).numpy()
 
     # Export model
+    print("Saving final model...", end='')
     export_obj(vertices, triangles, diffuse, normals, os.path.join(configargs.save_dir, f"{model_name}.obj"))
+    print("Saved!")
 
 if __name__ == "__main__":
     main()
