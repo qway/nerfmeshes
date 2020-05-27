@@ -28,7 +28,7 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
     Exports a mesh in the (.obj) format.
     """
 
-    with open(filename, 'w') as fh:
+    with open(filename, "w") as fh:
 
         for index, v in enumerate(vertices):
             fh.write("v {} {} {} {} {} {}\n".format(*v, *diffuse[index]))
@@ -43,30 +43,31 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 
             fh.write("\n")
 
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--config", type = str, required = True, help = "Path to (.yml) config file."
+        "--config", type=str, required=True, help="Path to (.yml) config file."
     )
     parser.add_argument(
-        "--base-dir",
-        type = str,
-        required = False,
-        help = "Override the default base dir.",
+        "--base-dir", type=str, required=False, help="Override the default base dir.",
     )
     parser.add_argument(
         "--checkpoint",
-        type = str,
-        required = True,
-        help = "Checkpoint / pre-trained model to evaluate.",
+        type=str,
+        required=True,
+        help="Checkpoint / pre-trained model to evaluate.",
     )
     parser.add_argument(
-        "--save-dir", type = str, help = "Save mesh to this directory, if specified.", default="."
+        "--save-dir",
+        type=str,
+        help="Save mesh to this directory, if specified.",
+        default=".",
     )
 
-    parser.add_argument('--cache-mesh', dest = 'cache_mesh', action = 'store_true')
-    parser.add_argument('--no-cache-mesh', dest = 'cache_mesh', action = 'store_false')
-    parser.set_defaults(cache_mesh = True)
+    parser.add_argument("--cache-mesh", dest="cache_mesh", action="store_true")
+    parser.add_argument("--no-cache-mesh", dest="cache_mesh", action="store_false")
+    parser.set_defaults(cache_mesh=True)
 
     configargs = parser.parse_args()
     cfg, model_name = None, None
@@ -77,7 +78,7 @@ def main():
     if torch.cuda.is_available():
         device = torch.cuda.current_device()
     else:
-        device = 'cpu'
+        device = "cpu"
 
     model = NeRFModel.load_from_checkpoint(configargs.checkpoint, cfg=cfg)
     model.eval()
@@ -92,11 +93,11 @@ def main():
     distance_length = 0.001
     distance_threshold = 0.001
     limit = 1.2
-    view_disparity = 2*limit/N
+    view_disparity = 2 * limit / N
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
     adjust_normals = False
-    specific_view = False
+    specific_view = True
 
     vertices, triangles, normals, diffuse = None, None, None, None
     if configargs.cache_mesh:
@@ -111,19 +112,24 @@ def main():
         density = np.zeros((pts_flat.shape[0]))
         for idx, batch in enumerate(tqdm(pts_flat_batch)):
             batch = batch.to(device)
-            result_batch = model.sample_points(batch, batch) # Reuse positions as fake rays
+            result_batch = model.sample_points(
+                batch, batch
+            )  # Reuse positions as fake rays
 
             # Extracting the density
-            density[idx * batch_size: (idx + 1) * batch_size] = result_batch[..., 3].cpu().detach().numpy()
+            density[idx * batch_size : (idx + 1) * batch_size] = (
+                result_batch[..., 3].cpu().detach().numpy()
+            )
 
         # Create a 3D density grid
         grid_alpha = density.reshape((N, N, N))
 
         # Extracting iso-surface triangulated
-        vertices, triangles, normals, values = measure.marching_cubes(grid_alpha, iso_value)
+        vertices, triangles, normals, values = measure.marching_cubes(
+            grid_alpha, iso_value
+        )
         vertices = np.ascontiguousarray(vertices)
         normals = np.ascontiguousarray(normals)
-
 
         if adjust_normals:
             # Re-adjust normals based on NERF's density grid
@@ -131,7 +137,9 @@ def main():
             tree = KDTree(pts_flat) if sampling_method == 0 else None
 
             # Create some density samples
-            density_samples = np.linspace(-distance_length, distance_length, density_samples_count)[:, np.newaxis]
+            density_samples = np.linspace(
+                -distance_length, distance_length, density_samples_count
+            )[:, np.newaxis]
 
             # Adjust normals with the assumption of having proper geometry
             print("Adjusting normals")
@@ -140,8 +148,11 @@ def main():
                 vertex_direction = normals[index][[1, 0, 2]]
 
                 # Sample points across the ray direction (a.k.a normal)
-                samples = vertex_norm[np.newaxis, :].repeat(density_samples_count, 0) + \
-                    vertex_direction[np.newaxis, :].repeat(density_samples_count, 0) * density_samples
+                samples = (
+                    vertex_norm[np.newaxis, :].repeat(density_samples_count, 0)
+                    + vertex_direction[np.newaxis, :].repeat(density_samples_count, 0)
+                    * density_samples
+                )
 
                 def extract_cum_density(samples):
                     inliers_indices = None
@@ -153,13 +164,27 @@ def main():
                         inliers_indices = indices[distances <= distance_threshold]
                     elif sampling_method == 1:
                         # Sample based on grid proximity
-                        indices = (np.around((samples + limit) / 2 / limit * N) * N ** np.arange(2, -1, -1)).sum(1).astype(int)
+                        indices = (
+                            (
+                                np.around((samples + limit) / 2 / limit * N)
+                                * N ** np.arange(2, -1, -1)
+                            )
+                            .sum(1)
+                            .astype(int)
+                        )
 
                         # Filtering exceeding boundaries
                         inliers_indices = indices[~(indices >= N ** 3)]
                     else:
                         # Sample based on re-computing the radiance field
-                        indices = (np.around((samples + limit) / 2 / limit * N) * N ** np.arange(2, -1, -1)).sum(1).astype(int)
+                        indices = (
+                            (
+                                np.around((samples + limit) / 2 / limit * N)
+                                * N ** np.arange(2, -1, -1)
+                            )
+                            .sum(1)
+                            .astype(int)
+                        )
 
                         # Filtering exceeding boundaries
                         inliers_indices = indices[~(indices >= N ** 3)]
@@ -172,13 +197,18 @@ def main():
 
                 # Re-direct the normal
                 if sample_density_1 < sample_density_2:
-                    normals[index] *= (-1)
+                    normals[index] *= -1
 
-        np.save(os.path.join(configargs.save_dir, "mesh_cache.npy"), (vertices, triangles, normals))
+        np.save(
+            os.path.join(configargs.save_dir, "mesh_cache.npy"),
+            (vertices, triangles, normals),
+        )
         print("Mesh geometry saved successfully")
     else:
         print("Loading mesh geometry...")
-        vertices, triangles, normals = np.load(os.path.join(configargs.save_dir, "mesh_cache.npy"), allow_pickle = True)
+        vertices, triangles, normals = np.load(
+            os.path.join(configargs.save_dir, "mesh_cache.npy"), allow_pickle=True
+        )
 
     print("Generating mesh texture...")
 
@@ -199,8 +229,8 @@ def main():
 
             result_batch = model.sample_points(pos_batch, normal_batch)
 
-            #Current color hack since the network does not normalize colors
-            result_batch = torch.sigmoid(result_batch[..., :3])*255
+            # Current color hack since the network does not normalize colors
+            result_batch = torch.sigmoid(result_batch[..., :3]) * 255
             # Query the whole diffuse map
             diffuse[offset1:offset2] = result_batch[..., :3].cpu().detach().numpy()
     if not specific_view:
@@ -211,9 +241,9 @@ def main():
 
         # Careful, do not set the near plane to zero!
         ray_bounds = (
-            torch.tensor([0.001, 2*view_disparity], dtype=ray_origins.dtype)
-                .view(1, 2)
-                .expand(batch_size, 2)
+            torch.tensor([0.001, 2 * view_disparity], dtype=ray_origins.dtype)
+            .view(1, 2)
+            .expand(batch_size, 2)
         ).to(device)
 
         pred = []
@@ -222,18 +252,25 @@ def main():
             offset2 = np.minimum(batch_size * (idx + 1), len(vertices))
             pos_batch = ray_origins[offset1:offset2].to(device)
             normal_batch = inv_normals[offset1:offset2].to(device)
-            ray_bounds_batch = ray_bounds[:offset2-offset1]
-            _, _, _, diffuse, _, _ = model((pos_batch,normal_batch, ray_bounds_batch))
+            ray_bounds_batch = ray_bounds[: offset2 - offset1]
+            _, _, _, diffuse, _, _ = model((pos_batch, normal_batch, ray_bounds_batch))
 
             pred.append(diffuse.cpu().detach())
 
         # Query the whole diffuse map
-        diffuse = torch.cat(pred, dim = 0).numpy()
+        diffuse = torch.cat(pred, dim=0).numpy()
 
     # Export model
-    print("Saving final model...", end='')
-    export_obj(vertices, triangles, diffuse, normals, os.path.join(configargs.save_dir, f"{model_name}.obj"))
+    print("Saving final model...", end="")
+    export_obj(
+        vertices,
+        triangles,
+        diffuse,
+        normals,
+        os.path.join(configargs.save_dir, f"{model_name}.obj"),
+    )
     print("Saved!")
+
 
 if __name__ == "__main__":
     main()

@@ -9,15 +9,19 @@ from torch.utils.data import Dataset
 from nerf import get_ray_bundle
 
 
-def load_blender_data2(data_config, reduced_resolution=None, start=0, stop=-1):
+def load_blender_data(data_config, reduced_resolution=None, start=0, stop=-1):
     """
 
     Args:
         data_config: Path to the config of the dataset.
         reduced_resolution: Provides an option to divide the resolution by a number.
-        skip: If frames in dataset should be skipped.
+        start: First image to load.
+        stop: Last image to load.
 
     Returns:
+        imgs: The images.
+        poses: Camera poses associated with the images.
+        [H, W, focal]: The camera parameters.
 
     """
     json_path = Path(data_config)
@@ -88,7 +92,7 @@ class BlenderRayDataset(Dataset):
         white_background=False,
     ):
         self.num_random_rays = num_random_rays
-        images, poses, hwf = load_blender_data2(
+        images, poses, hwf = load_blender_data(
             config_path, reduced_resolution=None, start=start, stop=stop,
         )
         H, W, self.focal = hwf
@@ -147,7 +151,7 @@ class BlenderImageDataset(Dataset):
         stop=-1,
         white_background=False,
     ):
-        images, poses, hwf = load_blender_data2(
+        images, poses, hwf = load_blender_data(
             config_path, reduced_resolution=None, start=start, stop=stop,
         )
         H, W, self.focal = hwf

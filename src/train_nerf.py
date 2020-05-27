@@ -15,9 +15,11 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 from typing import Tuple
 
-from nerf import models, CfgNode, mse2psnr, sample_pdf_2, BlenderRayDataset, \
-    BlenderImageDataset, VolumeRenderer, RaySampleInterval, sample_pdf, SamplePDF
+from data.datasets import BlenderRayDataset, BlenderImageDataset, ScanNetDataset
+from data.load_scannet import SensorData
+from nerf import models, CfgNode, mse2psnr, VolumeRenderer, RaySampleInterval, SamplePDF
 import numpy as np
+
 
 def load_config(configargs):
     cfg = None
@@ -26,7 +28,8 @@ def load_config(configargs):
         cfg = CfgNode(cfg_dict)
     return cfg
 
-def flatten_dict(d, parent_key='', sep='_'):
+
+def flatten_dict(d, parent_key="", sep="_"):
     items = []
     for k, v in d.items():
         new_key = parent_key + sep + k if parent_key else k
@@ -41,7 +44,7 @@ def cast_to_image(tensor):
     # Input tensor is (H, W, 3). Convert to (3, H, W).
     tensor = tensor.permute(2, 0, 1)
     # Conver to PIL Image and then np.array (output shape: (H, W, 3))
-    img = np.array(torchvision.transforms.ToPILImage()(tensor.detach().cpu()))
+    img = np.array(torchvision.transforms.ToPILImage()(tensor.detach().cpu().float()))
     # Map back to shape (3, H, W), as tensorboard needs channels first.
     img = np.moveaxis(img, [-1], [0])
     return img
@@ -107,6 +110,7 @@ def create_intervals(
         point_intervals = lower + (upper - lower) * t_rand
     return point_intervals
 
+
 def get_ray_batch(ray_batch):
     """ Removes all unecessary dimensions from a ray batch. """
     ray_origins, ray_directions, bounds, ray_targets = ray_batch
@@ -135,6 +139,8 @@ class NeRFModel(LightningModule):
         )
         self.sample_interval = RaySampleInterval(cfg.nerf.train.num_coarse)
         self.sample_pdf = SamplePDF(cfg.nerf.train.num_fine)
+        if self.cfg.dataset.type == "scannet":
+            self.sensor_data = None
 
     def forward(self, x):
         """ Does a prediction for a batch of rays.
@@ -164,15 +170,10 @@ class NeRFModel(LightningModule):
             acc_coarse,
             weights,
             depth_coarse,
-        ) = self.volume_renderer(
-            coarse_radiance_field,
-            ray_intervals,
-            ray_directions,
-        )
+        ) = self.volume_renderer(coarse_radiance_field, ray_intervals, ray_directions,)
         rgb_fine, disp_fine, acc_fine = None, None, None
         if nerf_cfg.num_fine > 0 and self.model_fine:
-            ray_intervals = self.sample_pdf(
-                ray_intervals, weights, nerf_cfg.perturb)
+            ray_intervals = self.sample_pdf(ray_intervals, weights, nerf_cfg.perturb)
             raypoints = intervals_to_raypoints(
                 ray_intervals, ray_directions, ray_origins
             )
@@ -180,9 +181,7 @@ class NeRFModel(LightningModule):
             expanded_ray_directions = ray_directions[..., None, :].expand_as(raypoints)
             fine_radiance_field = self.model_fine(raypoints, expanded_ray_directions)
             rgb_fine, disp_fine, acc_fine, _, _ = self.volume_renderer(
-                fine_radiance_field,
-                ray_intervals,
-                ray_directions
+                fine_radiance_field, ray_intervals, ray_directions
             )
 
         return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
@@ -195,7 +194,6 @@ class NeRFModel(LightningModule):
 
     def training_step(self, ray_batch, batch_idx):
         ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(ray_batch)
-
 
         rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
             (ray_origins, ray_directions, bounds)
@@ -228,7 +226,9 @@ class NeRFModel(LightningModule):
         return output
 
     def validation_step(self, image_ray_batch, batch_idx):
-        ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(image_ray_batch)
+        ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(
+            image_ray_batch
+        )
 
         # Manual batching, since images can be bigger than memory allows
         batchsize = self.cfg.nerf.validation.chunksize
@@ -271,9 +271,6 @@ class NeRFModel(LightningModule):
 
         psnr = mse2psnr(loss)
 
-
-
-
         self.logger.experiment.add_image(
             "validation/rgb_coarse",
             cast_to_image(
@@ -310,36 +307,59 @@ class NeRFModel(LightningModule):
         log_vals = {}
         for k in outputs[0].keys():
             log_vals[k] = torch.stack([x[k] for x in outputs]).mean()
-        val_loss_mean = log_vals['val_loss']
-        del log_vals['val_loss']
-        for k,v in log_vals.items():
+        val_loss_mean = log_vals["val_loss"]
+        del log_vals["val_loss"]
+        for k, v in log_vals.items():
             log_vals[k] = v.item()
 
-        return {'val_loss': val_loss_mean, "log": log_vals}
+        return {"val_loss": val_loss_mean, "log": log_vals}
 
     def train_dataloader(self):
-        self.train_dataset = BlenderRayDataset(
-            self.dataset_basepath / "transforms_train.json",
-            self.cfg.nerf.train.num_random_rays,
-            cfg.dataset.near,
-            cfg.dataset.far,
-            shuffle=True,
-            white_background=self.cfg.nerf.train.white_background,
-            #stop=5, # Debug by loading only small part of the dataset
-        )
+        if self.cfg.dataset.type == "blender":
+            self.train_dataset = BlenderRayDataset(
+                self.dataset_basepath / "transforms_train.json",
+                self.cfg.nerf.train.num_random_rays,
+                cfg.dataset.near,
+                cfg.dataset.far,
+                shuffle=True,
+                white_background=self.cfg.nerf.train.white_background,
+                # stop=5, # Debug by loading only small part of the dataset
+            )
+        elif self.cfg.dataset.type == "scannet":
+            if not self.sensor_data:
+                self.sensor_data = SensorData(self.dataset_basepath / (self.dataset_basepath.name + ".sens"))
+            self.train_dataset = ScanNetDataset(
+                self.sensor_data,
+                num_random_rays=self.cfg.nerf.train.num_random_rays,
+                near=cfg.dataset.near,
+                far=cfg.dataset.far,
+                stop=100, # Debug by loading only small part of the dataset
+                skip_every=10000,
+            )
 
-        train_dataloader = DataLoader(self.train_dataset, batch_size=None)
+        train_dataloader = DataLoader(self.train_dataset, batch_size=1, shuffle=True)
         return train_dataloader
 
     def val_dataloader(self):
-        self.val_dataset = BlenderImageDataset(
-            self.dataset_basepath / "transforms_val.json",
-            self.cfg.dataset.near,
-            self.cfg.dataset.far,
-            shuffle=True,
-            white_background=self.cfg.nerf.train.white_background,
-            stop=1,  #  Debug by only loading a small part of the dataset
-        )
+        if self.cfg.dataset.type == "blender":
+            self.val_dataset = BlenderImageDataset(
+                self.dataset_basepath / "transforms_val.json",
+                self.cfg.dataset.near,
+                self.cfg.dataset.far,
+                shuffle=True,
+                white_background=self.cfg.nerf.train.white_background,
+                stop=10,  #  Debug by only loading a small part of the dataset
+            )
+        elif self.cfg.dataset.type == "scannet":
+            if not self.sensor_data:
+                self.sensor_data = SensorData(self.dataset_basepath / (self.dataset_basepath.name + ".sens"))
+            self.val_dataset = ScanNetDataset(
+                self.sensor_data,
+                near=cfg.dataset.near,
+                far=cfg.dataset.far,
+                stop=10, # Debug by loading only small part of the dataset
+                skip=100
+            )
         val_dataloader = DataLoader(self.val_dataset, batch_size=None)
         return val_dataloader
 
@@ -355,7 +375,10 @@ if __name__ == "__main__":
         "--config", type=str, required=True, help="Path to (.yml) config file."
     )
     parser.add_argument(
-        "--gpus", type=int, default=1, help="Amount of Gpus that should be used(In most cases leave at 1)"
+        "--gpus",
+        type=int,
+        default=1,
+        help="Amount of Gpus that should be used(In most cases leave at 1)",
     )
     parser.add_argument(
         "--load-checkpoint",
@@ -373,31 +396,31 @@ if __name__ == "__main__":
     seed_everything(cfg.experiment.randomseed)
 
     logdir = Path("../logs") / (cfg.experiment.id + time.strftime("_%y-%m-%d-%H:%M"))
-    os.makedirs(logdir)
+    os.makedirs(logdir, exist_ok=True)
     with open(os.path.join(logdir, "config.yml"), "w") as f:
         f.write(cfg.dump())  # cfg, f, default_flow_style=False)
     logger = TensorBoardLogger(logdir)
-    logger.experiment.add_text("config", cfg.dump(),0)
+    logger.experiment.add_text("config", cfg.dump(), 0)
     checkpoint_callback = ModelCheckpoint(
         filepath=logdir,
         save_top_k=True,
         verbose=True,
-        monitor='val_loss',
-        mode='min',
-        prefix=''
+        monitor="val_loss",
+        mode="min",
+        prefix="",
     )
     trainer = Trainer(
         gpus=configargs.gpus,
-        val_check_interval=cfg.experiment.validate_every,
+        #val_check_interval=cfg.experiment.validate_every,
         default_root_dir="../logs",
         logger=logger,
         checkpoint_callback=checkpoint_callback,
-        #profiler=True, # Activate for very simple profiling
-        #fast_dev_run=True, # Activate when debugging
+        # profiler=True, # Activate for very simple profiling
+        # fast_dev_run=True, # Activate when debugging
         max_steps=cfg.experiment.train_iters,
-        #log_gpu_memory=True,
+        # log_gpu_memory=True,
         deterministic=True,
-        accumulate_grad_batches=2
+        accumulate_grad_batches=2,
     )
     model = NeRFModel(cfg)
 

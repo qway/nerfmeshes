@@ -18,9 +18,12 @@ class FlexibleNeRFModel(torch.nn.Module):
         use_viewdirs=True,
     ):
         super(FlexibleNeRFModel, self).__init__()
-        self.encode_xyz = PositionalEncoding(num_encoding_fn_xyz, include_input_xyz, log_sampling_xyz)
-        self.encode_dir = PositionalEncoding(num_encoding_fn_dir, include_input_dir, log_sampling_dir)
-
+        self.encode_xyz = PositionalEncoding(
+            num_encoding_fn_xyz, include_input_xyz, log_sampling_xyz
+        )
+        self.encode_dir = PositionalEncoding(
+            num_encoding_fn_dir, include_input_dir, log_sampling_dir
+        )
 
         include_input_xyz = 3 if include_input_xyz else 0
         include_input_dir = 3 if include_input_dir else 0
@@ -61,9 +64,9 @@ class FlexibleNeRFModel(torch.nn.Module):
         x = self.layer1(xyz)
         for i in range(len(self.layers_xyz)):
             if (
-                    i % self.skip_connect_every == 0
-                    and i > 0
-                    and i != len(self.linear_layers) - 1
+                i % self.skip_connect_every == 0
+                and i > 0
+                and i != len(self.linear_layers) - 1
             ):
                 x = torch.cat((x, xyz), dim=-1)
             x = self.relu(self.layers_xyz[i](x))

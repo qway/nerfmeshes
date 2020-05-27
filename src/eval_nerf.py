@@ -14,6 +14,7 @@ from nerf import (
     CfgNode,
     get_ray_bundle,
     run_one_iter_of_nerf,
+    load_blender_data,
 )
 from train_nerf import NeRFModel
 
@@ -63,16 +64,17 @@ def main():
     if torch.cuda.is_available():
         device = torch.cuda.current_device()
     else:
-        device = 'cpu'
+        device = "cpu"
 
     model = NeRFModel.load_from_checkpoint(configargs.checkpoint, cfg=cfg)
     model.eval()
     model.to(device)
 
+    imgs, poses, hwf = load_blender_data(
+        Path(cfg.dataset.basedir) / "transforms_train.json"
+    )
 
-    height = 800
-    width = 800
-    focal = 35
+    H, W, focal = hwf
 
     model_coarse.eval()
     if model_fine:
