@@ -17,6 +17,7 @@ from nerf import (CfgNode, get_embedding_function, get_ray_bundle, img2mse,
 
 def main():
     parser = argparse.ArgumentParser()
+
     parser.add_argument(
         "--config", type=str, required=True, help="Path to (.yml) config file."
     )
@@ -26,6 +27,7 @@ def main():
         default="",
         help="Path to load saved checkpoint from.",
     )
+
     configargs = parser.parse_args()
 
     # Read config file.
@@ -34,13 +36,10 @@ def main():
         cfg_dict = yaml.load(f, Loader=yaml.FullLoader)
         cfg = CfgNode(cfg_dict)
 
-    # # (Optional:) enable this to track autograd issues when debugging
-    # torch.autograd.set_detect_anomaly(True)
-
     # If a pre-cached dataset is available, skip the dataloader.
     USE_CACHED_DATASET = False
     train_paths, validation_paths = None, None
-    images, poses, render_poses, hwf, i_split = None, None, None, None, None
+    images, poses, render_poses, hwf, i_split, depth_data = None, None, None, None, None, None
     H, W, focal, i_train, i_val, i_test = None, None, None, None, None, None
     if hasattr(cfg.dataset, "cachedir") and os.path.exists(cfg.dataset.cachedir):
         train_paths = glob.glob(os.path.join(cfg.dataset.cachedir, "train", "*.data"))
@@ -50,42 +49,15 @@ def main():
         USE_CACHED_DATASET = True
     else:
         # Load dataset
-        images, poses, render_poses, hwf = None, None, None, None
-        if cfg.dataset.type.lower() == "blender":
-            images, poses, render_poses, hwf, i_split = load_blender_data(
-                cfg.dataset.basedir,
-                half_res=cfg.dataset.half_res,
-                testskip=cfg.dataset.testskip,
-            )
-            i_train, i_val, i_test = i_split
-            H, W, focal = hwf
-            H, W = int(H), int(W)
-            hwf = [H, W, focal]
-            if cfg.nerf.train.white_background:
-                images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])
-        elif cfg.dataset.type.lower() == "llff":
-            images, poses, bds, render_poses, i_test = load_llff_data(
-                cfg.dataset.basedir, factor=cfg.dataset.downsample_factor
-            )
-            hwf = poses[0, :3, -1]
-            poses = poses[:, :3, :4]
-            if not isinstance(i_test, list):
-                i_test = [i_test]
-            if cfg.dataset.llffhold > 0:
-                i_test = np.arange(images.shape[0])[:: cfg.dataset.llffhold]
-            i_val = i_test
-            i_train = np.array(
-                [
-                    i
-                    for i in np.arange(images.shape[0])
-                    if (i not in i_test and i not in i_val)
-                ]
-            )
-            H, W, focal = hwf
-            H, W = int(H), int(W)
-            hwf = [H, W, focal]
-            images = torch.from_numpy(images)
-            poses = torch.from_numpy(poses)
+        images, poses, depth_data, render_poses, (H, W, focal), i_split = load_blender_data(
+            cfg.dataset.basedir,
+            categories=["test", "val"],
+        )
+        i_train, i_val = i_split
+
+        H, W = int(H), int(W)
+        if cfg.nerf.train.white_background:
+            images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])
 
     # Seed experiment for repeatability
     seed = cfg.experiment.randomseed
@@ -93,10 +65,7 @@ def main():
     torch.manual_seed(seed)
 
     # Device on which to run.
-    if torch.cuda.is_available():
-        device = "cuda"
-    else:
-        device = "cpu"
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     encode_position_fn = get_embedding_function(
         num_encoding_functions=cfg.models.coarse.num_encoding_fn_xyz,
@@ -142,11 +111,27 @@ def main():
     )
 
     # Setup logging.
-    logdir = os.path.join(cfg.experiment.logdir, cfg.experiment.id)
-    os.makedirs(logdir, exist_ok=True)
-    writer = SummaryWriter(logdir)
+    log_dir = os.path.join(cfg.experiment.logdir, cfg.experiment.id)
+    try:
+        os.makedirs(log_dir)
+    except OSError:
+        root_path = log_dir
+        counter = 1
+        while os.path.exists(log_dir):
+            log_dir = root_path + f"_unnamed_{counter}"
+            counter += 1
+
+        # Rename the main folder
+        os.rename(root_path, log_dir)
+        os.makedirs(root_path)
+
+        log_dir = root_path
+
+    # Create a writer
+    writer = SummaryWriter(log_dir)
+
     # Write out config parameters.
-    with open(os.path.join(logdir, "config.yml"), "w") as f:
+    with open(os.path.join(log_dir, "config.yml"), "w") as f:
         f.write(cfg.dump())  # cfg, f, default_flow_style=False)
 
     # By default, start at iteration 0 (unless a checkpoint is specified).
@@ -161,8 +146,11 @@ def main():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_iter = checkpoint["iter"]
 
-    # # TODO: Prepare raybatch tensor if batching random rays
+    # TODO: Prepare raybatch tensor if batching random rays
     for i in trange(start_iter, cfg.experiment.train_iters):
+
+        # if i >= 15200:
+        #     exit(-1)
 
         model_coarse.train()
         if model_fine:
@@ -170,6 +158,7 @@ def main():
 
         rgb_coarse, rgb_fine = None, None
         target_ray_values = None
+        depth_data_s = None
         if USE_CACHED_DATASET:
             datafile = np.random.choice(train_paths)
             cache_dict = torch.load(datafile)
@@ -191,7 +180,7 @@ def main():
             target_ray_values = target_ray_values[select_inds].to(device)
             # ray_bundle = torch.stack([ray_origins, ray_directions], dim=0).to(device)
 
-            rgb_coarse, _, _, rgb_fine, _, _ = run_one_iter_of_nerf(
+            rgb_coarse, _, _, depth_coarse, rgb_fine, _, _, depth_fine = run_one_iter_of_nerf(
                 cache_dict["height"],
                 cache_dict["width"],
                 cache_dict["focal_length"],
@@ -205,14 +194,22 @@ def main():
                 encode_direction_fn=encode_direction_fn,
             )
         else:
+            # using the test set instead of train
             img_idx = np.random.choice(i_train)
             img_target = images[img_idx].to(device)
             pose_target = poses[img_idx, :3, :4].to(device)
+            depth_data_target = depth_data[img_idx].to(device)
+
+            # generate training data
             ray_origins, ray_directions = get_ray_bundle(H, W, focal, pose_target)
+
+            # generates 2x by copying the arange output across consecutive dimensions, reverse the values when stacking
             coords = torch.stack(
                 meshgrid_xy(torch.arange(H).to(device), torch.arange(W).to(device)),
                 dim=-1,
             )
+
+            # create a list of H * W indices in form of (width, height), H * W * 2
             coords = coords.reshape((-1, 2))
             select_inds = np.random.choice(
                 coords.shape[0], size=(cfg.nerf.train.num_random_rays), replace=False
@@ -222,9 +219,10 @@ def main():
             ray_directions = ray_directions[select_inds[:, 0], select_inds[:, 1], :]
             # batch_rays = torch.stack([ray_origins, ray_directions], dim=0)
             target_s = img_target[select_inds[:, 0], select_inds[:, 1], :]
+            depth_data_s = depth_data_target[select_inds[:, 0], select_inds[:, 1]]
 
             then = time.time()
-            rgb_coarse, _, _, rgb_fine, _, _ = run_one_iter_of_nerf(
+            rgb_coarse, _, _, depth_coarse, rgb_fine, _, _, depth_fine = run_one_iter_of_nerf(
                 H,
                 W,
                 focal,
@@ -236,26 +234,42 @@ def main():
                 mode="train",
                 encode_position_fn=encode_position_fn,
                 encode_direction_fn=encode_direction_fn,
+                depth_data = depth_data_s,
             )
+
             target_ray_values = target_s
 
-        coarse_loss = torch.nn.functional.mse_loss(
-            rgb_coarse[..., :3], target_ray_values[..., :3]
-        )
+        # rgb loss
+        # coarse_loss = torch.nn.functional.mse_loss(
+        #     rgb_coarse[..., :3], target_ray_values[..., :3]
+        # )
+        coarse_loss = torch.tensor(0)
+
         fine_loss = None
         if rgb_fine is not None:
             fine_loss = torch.nn.functional.mse_loss(
                 rgb_fine[..., :3], target_ray_values[..., :3]
             )
-        # loss = torch.nn.functional.mse_loss(rgb_pred[..., :3], target_s[..., :3])
-        loss = 0.0
-        # if fine_loss is not None:
-        #     loss = fine_loss
-        # else:
-        #     loss = coarse_loss
-        loss = coarse_loss + (fine_loss if fine_loss is not None else 0.0)
+
+        # depth loss
+        coarse_depth_loss, fine_depth_loss = torch.tensor(0), torch.tensor(0)
+        if depth_data is not None:
+            # coarse_depth_loss = torch.nn.functional.mse_loss(
+            #     depth_coarse, depth_data_s
+            # )
+
+            if depth_fine is not None:
+                fine_depth_loss = torch.nn.functional.mse_loss(
+                    depth_fine, depth_data_s
+                )
+
+        loss = (fine_loss if fine_loss is not None else 0.0)
+        psnr = mse2psnr(fine_loss.item())
+
+        # if depth_data is not None and fine_depth_loss is not None:
+        #     loss += fine_depth_loss * 0.001
+
         loss.backward()
-        psnr = mse2psnr(loss.item())
         optimizer.step()
         optimizer.zero_grad()
 
@@ -273,21 +287,28 @@ def main():
                 + str(i)
                 + " Loss: "
                 + str(loss.item())
+                + " Loss Depth: "
+                + str(fine_depth_loss.item())
                 + " PSNR: "
                 + str(psnr)
             )
+
         writer.add_scalar("train/loss", loss.item(), i)
         writer.add_scalar("train/coarse_loss", coarse_loss.item(), i)
         if rgb_fine is not None:
             writer.add_scalar("train/fine_loss", fine_loss.item(), i)
+
+        if depth_data is not None:
+            writer.add_scalar("train/coarse_depth_loss", coarse_depth_loss.item(), i)
+            if depth_fine is not None:
+                writer.add_scalar("train/fine_depth_loss", fine_depth_loss.item(), i)
+
         writer.add_scalar("train/psnr", psnr, i)
 
         # Validation
-        if (
-            i % cfg.experiment.validate_every == 0
-            or i == cfg.experiment.train_iters - 1
-        ):
-            tqdm.write("[VAL] =======> Iter: " + str(i))
+        with_validation = False
+        if with_validation and i % cfg.experiment.validate_every == 0 or i == cfg.experiment.train_iters - 1:
+            tqdm.write("  [VAL] =======> Iter: " + str(i))
             model_coarse.eval()
             if model_fine:
                 model_coarse.eval()
@@ -299,7 +320,7 @@ def main():
                 if USE_CACHED_DATASET:
                     datafile = np.random.choice(validation_paths)
                     cache_dict = torch.load(datafile)
-                    rgb_coarse, _, _, rgb_fine, _, _ = run_one_iter_of_nerf(
+                    rgb_coarse, _, _, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
                         cache_dict["height"],
                         cache_dict["width"],
                         cache_dict["focal_length"],
@@ -320,7 +341,8 @@ def main():
                     ray_origins, ray_directions = get_ray_bundle(
                         H, W, focal, pose_target
                     )
-                    rgb_coarse, _, _, rgb_fine, _, _ = run_one_iter_of_nerf(
+
+                    rgb_coarse, _, _, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
                         H,
                         W,
                         focal,
@@ -334,6 +356,7 @@ def main():
                         encode_direction_fn=encode_direction_fn,
                     )
                     target_ray_values = img_target
+
                 coarse_loss = img2mse(rgb_coarse[..., :3], target_ray_values[..., :3])
                 loss, fine_loss = 0.0, 0.0
                 if rgb_fine is not None:
@@ -360,7 +383,7 @@ def main():
                     i,
                 )
                 tqdm.write(
-                    "Validation loss: "
+                    "  Validation loss: "
                     + str(loss.item())
                     + " Validation PSNR: "
                     + str(psnr)
@@ -381,7 +404,7 @@ def main():
             }
             torch.save(
                 checkpoint_dict,
-                os.path.join(logdir, "checkpoint" + str(i).zfill(5) + ".ckpt"),
+                os.path.join(log_dir, "checkpoint" + str(i).zfill(5) + ".ckpt"),
             )
             tqdm.write("================== Saved Checkpoint =================")
 

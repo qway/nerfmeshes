@@ -17,6 +17,7 @@ from nerf import (
     models,
     get_embedding_function,
     run_one_iter_of_nerf,
+    mse2psnr,
 )
 
 
@@ -37,7 +38,6 @@ def cast_to_disparity_image(tensor):
 
 
 def main():
-
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--config", type=str, required=True, help="Path to (.yml) config file."
@@ -49,11 +49,15 @@ def main():
         help="Checkpoint / pre-trained model to evaluate.",
     )
     parser.add_argument(
-        "--savedir", type=str, help="Save images to this directory, if specified."
+        "--save-dir", type=str, help="Save images to this directory, if specified."
     )
     parser.add_argument(
         "--save-disparity-image", action="store_true", help="Save disparity images too."
     )
+    parser.add_argument('--synthesis-images', dest = 'synthesis_images', action = 'store_true')
+    parser.add_argument('--no-synthesis-images', dest = 'synthesis_images', action = 'store_false')
+    parser.set_defaults(synthesis_images = True)
+
     configargs = parser.parse_args()
 
     # Read config file.
@@ -62,16 +66,18 @@ def main():
         cfg_dict = yaml.load(f, Loader=yaml.FullLoader)
         cfg = CfgNode(cfg_dict)
 
-    images, poses, render_poses, hwf = None, None, None, None
+    images, poses, depth_imgs, render_poses, hwf = None, None, None, None, None
     i_train, i_val, i_test = None, None, None
     if cfg.dataset.type.lower() == "blender":
         # Load blender dataset
-        images, poses, render_poses, hwf, i_split = load_blender_data(
+        images, poses, depth_imgs, render_poses, hwf, i_split = load_blender_data(
             cfg.dataset.basedir,
+            categories=["test", "val"],
             half_res=cfg.dataset.half_res,
             testskip=cfg.dataset.testskip,
         )
-        i_train, i_val, i_test = i_split
+
+        i_test, i_val = i_split
         H, W, focal = hwf
         H, W = int(H), int(W)
     elif cfg.dataset.type.lower() == "llff":
@@ -146,23 +152,25 @@ def main():
     if model_fine:
         model_fine.eval()
 
-    render_poses = render_poses.float().to(device)
-
-    # Create directory to save images to.
-    os.makedirs(configargs.savedir, exist_ok=True)
-    if configargs.save_disparity_image:
-        os.makedirs(os.path.join(configargs.savedir, "disparity"), exist_ok=True)
+    if configargs.synthesis_images:
+        eval_poses = render_poses.float()
+    else:
+        eval_poses = poses.float()
 
     # Evaluation loop
     times_per_image = []
-    for i, pose in enumerate(tqdm(render_poses)):
+    for i, index in enumerate(tqdm(i_test)):
+        pose = eval_poses[index].to(device)
+        img_target = images[index].to(device)
+        dep_target = depth_imgs[index].to(device)
+
         start = time.time()
         rgb = None, None
         disp = None, None
         with torch.no_grad():
             pose = pose[:3, :4]
             ray_origins, ray_directions = get_ray_bundle(hwf[0], hwf[1], hwf[2], pose)
-            rgb_coarse, disp_coarse, _, rgb_fine, disp_fine, _ = run_one_iter_of_nerf(
+            rgb_coarse, disp_coarse, _, depth_coarse, rgb_fine, disp_fine, _, depth_fine, z_vals, weights = run_one_iter_of_nerf(
                 hwf[0],
                 hwf[1],
                 hwf[2],
@@ -175,18 +183,56 @@ def main():
                 encode_position_fn=encode_position_fn,
                 encode_direction_fn=encode_direction_fn,
             )
+
             rgb = rgb_fine if rgb_fine is not None else rgb_coarse
             if configargs.save_disparity_image:
                 disp = disp_fine if disp_fine is not None else disp_coarse
+
+        coarse_loss = torch.nn.functional.mse_loss(
+            rgb_coarse[..., :3], img_target[..., :3]
+        )
+
+        fine_loss = torch.tensor(0)
+        if rgb_fine is not None:
+            fine_loss = torch.nn.functional.mse_loss(
+                rgb_fine[..., :3], img_target[..., :3]
+            )
+
+        torch.save({
+            "z_vals": z_vals,
+            "weights": weights,
+            "depth_coarse": depth_coarse,
+            "depth_fine": depth_fine,
+            "dep_target": dep_target
+        }, "../../data/output/eval_sample_depth_weights_from_volume_render_fn.pt")
+
+        # print(z_vals[400][400][:64])
+        # print(z_vals[400][400][64:])
+        # print(weights[400][400][:64])
+        # print(weights[400][400][64:128])
+        # print(weights[400][400][128:])
+        # print(depth_coarse[400][400])
+        # print(depth_fine[400][400])
+        # print(dep_target[400][400])
+        exit(-1)
+        coarse_depth_loss = torch.nn.functional.mse_loss(depth_coarse, dep_target)
+        fine_depth_loss = torch.nn.functional.mse_loss(depth_fine, dep_target)
+
+        print(f"Loss MSE image {i}: Coarse Loss: {coarse_loss} / Fine Loss: {fine_loss}")
+        print(f"Loss PSNR image {i}: Coarse PSNR: {mse2psnr(coarse_loss.item())} / Fine PSNR: {mse2psnr(fine_loss.item())}")
+        print(f"Loss Depth image {i}: Coarse Depth: {coarse_depth_loss} / Fine Depth: {fine_depth_loss}")
+
         times_per_image.append(time.time() - start)
-        if configargs.savedir:
-            savefile = os.path.join(configargs.savedir, f"{i:04d}.png")
+        if configargs.save_dir:
+            savefile = os.path.join(configargs.save_dir, f"{i:04d}.png")
             imageio.imwrite(
                 savefile, cast_to_image(rgb[..., :3], cfg.dataset.type.lower())
             )
+
             if configargs.save_disparity_image:
-                savefile = os.path.join(configargs.savedir, "disparity", f"{i:04d}.png")
+                savefile = os.path.join(configargs.save_dir, "disparity", f"{i:04d}.png")
                 imageio.imwrite(savefile, cast_to_disparity_image(disp))
+
         tqdm.write(f"Avg time per image: {sum(times_per_image) / (i + 1)}")
 
 

@@ -65,7 +65,7 @@ def cumprod_exclusive(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def get_ray_bundle(
-    height: int, width: int, focal_length: float, tform_cam2world: torch.Tensor
+    height: int, width: int, focal_length: float, tform_cam2world: torch.Tensor, depth_map: torch.Tensor = None
 ):
     r"""Compute the bundle of rays passing through all pixels of an image (one ray per pixel).
 
@@ -75,6 +75,7 @@ def get_ray_bundle(
     focal_length (float or torch.Tensor): Focal length (number of pixels, i.e., calibrated intrinsics).
     tform_cam2world (torch.Tensor): A 6-DoF rigid-body transform (shape: :math:`(4, 4)`) that
       transforms a 3D point from the camera frame to the "world" frame for the current example.
+    depth_map (torch.Tensor): Depth (W x H) for each individual pixel
 
     Returns:
     ray_origins (torch.Tensor): A tensor of shape :math:`(width, height, 3)` denoting the centers of
@@ -95,6 +96,8 @@ def get_ray_bundle(
             height, dtype=tform_cam2world.dtype, device=tform_cam2world.device
         ),
     )
+
+    # (W, H, 3)
     directions = torch.stack(
         [
             (ii - width * 0.5) / focal_length,
@@ -103,10 +106,18 @@ def get_ray_bundle(
         ],
         dim=-1,
     )
+
+    # if depth_map is not None:
+    #     # find 3D correspondences
+    #     correspondences = (-1) * directions * depth_map[..., None]
+
+    # (W, H, 1, 3) * (3, 3) => (W, H, 3, 3) => (W, H, 3)
     ray_directions = torch.sum(
         directions[..., None, :] * tform_cam2world[:3, :3], dim=-1
     )
+
     ray_origins = tform_cam2world[:3, -1].expand(ray_directions.shape)
+
     return ray_origins, ray_directions
 
 

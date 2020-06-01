@@ -1,12 +1,15 @@
 import argparse
 import os
 import time
+
+import imageio
 import numpy as np
 import torch
 import torchvision
 import yaml
 
-from pathlib import Path
+from nerf.volume_rendering_utils import volume_render_radiance_field
+from nerf.train_utils import predict_and_render_radiance
 from nerf import run_network
 from skimage import measure
 from scipy.spatial import KDTree
@@ -16,13 +19,30 @@ from nerf import get_minibatches
 
 from nerf import (
     CfgNode,
+    get_ray_bundle,
     load_blender_data,
     load_llff_data,
     models,
     get_embedding_function,
-    predict_and_render_radiance,
-    volume_render_radiance_field
+    run_one_iter_of_nerf,
 )
+
+
+def cast_to_image(tensor, dataset_type):
+    # Input tensor is (H, W, 3). Convert to (3, H, W).
+    tensor = tensor.permute(2, 0, 1)
+    # Convert to PIL Image and then np.array (output shape: (H, W, 3))
+    img = np.array(torchvision.transforms.ToPILImage()(tensor.detach().cpu()))
+    return img
+    # # Map back to shape (3, H, W), as tensorboard needs channels first.
+    # return np.moveaxis(img, [-1], [0])
+
+
+def cast_to_disparity_image(tensor):
+    img = (tensor - tensor.min()) / (tensor.max() - tensor.min())
+    img = img.clamp(0, 1) * 255
+    return img.detach().cpu().numpy().astype(np.uint8)
+
 
 def export_obj(vertices, triangles, diffuse, normals, filename):
     """
@@ -72,13 +92,37 @@ def main():
     configargs = parser.parse_args()
 
     # Read config file.
-    cfg, model_name = None, None
+    cfg = None
     with open(configargs.config, "r") as f:
         cfg_dict = yaml.load(f, Loader = yaml.FullLoader)
-        cfg, model_name = CfgNode(cfg_dict), Path(f.name).stem
+        cfg = CfgNode(cfg_dict)
+
+    images, poses, render_poses, hwf = None, None, None, None
+    i_train, i_val, i_test = None, None, None
+    if cfg.dataset.type.lower() == "blender":
+        # Load blender dataset
+        images, poses, render_poses, hwf, i_split = load_blender_data(
+            configargs.base_dir if configargs.base_dir is not None else cfg.dataset.basedir,
+            half_res = cfg.dataset.half_res,
+            testskip = cfg.dataset.testskip,
+        )
+        i_train, i_val, i_test = i_split
+        H, W, focal = hwf
+        H, W = int(H), int(W)
+    elif cfg.dataset.type.lower() == "llff":
+        # Load LLFF dataset
+        images, poses, bds, render_poses, i_test = load_llff_data(
+            configargs.base_dir if configargs.base_dir is not None else cfg.dataset.basedir, factor = cfg.dataset.downsample_factor,
+        )
+        hwf = poses[0, :3, -1]
+        H, W, focal = hwf
+        hwf = [int(H), int(W), focal]
+        render_poses = torch.from_numpy(render_poses)
 
     # Device on which to run.
-    device = "cpu" if not torch.cuda.is_available() else "cuda"
+    device = "cpu"
+    if torch.cuda.is_available():
+        device = "cuda"
 
     encode_position_fn = get_embedding_function(
         num_encoding_functions = cfg.models.coarse.num_encoding_fn_xyz,
@@ -101,7 +145,8 @@ def main():
         include_input_xyz = cfg.models.coarse.include_input_xyz,
         include_input_dir = cfg.models.coarse.include_input_dir,
         use_viewdirs = cfg.models.coarse.use_viewdirs,
-    ).to(device)
+    )
+    model_coarse.to(device)
 
     # If a fine-resolution model is specified, initialize it.
     model_fine = None
@@ -112,7 +157,8 @@ def main():
             include_input_xyz = cfg.models.fine.include_input_xyz,
             include_input_dir = cfg.models.fine.include_input_dir,
             use_viewdirs = cfg.models.fine.use_viewdirs,
-        ).to(device)
+        )
+        model_fine.to(device)
 
     checkpoint = torch.load(configargs.checkpoint)
     model_coarse.load_state_dict(checkpoint["model_coarse_state_dict"])
@@ -124,6 +170,12 @@ def main():
                 "The checkpoint has a fine-level model, but it could "
                 "not be loaded (possibly due to a mismatched config file."
             )
+    if "height" in checkpoint.keys():
+        hwf[0] = checkpoint["height"]
+    if "width" in checkpoint.keys():
+        hwf[1] = checkpoint["width"]
+    if "focal_length" in checkpoint.keys():
+        hwf[2] = checkpoint["focal_length"]
 
     model_coarse.eval()
     if model_fine:
@@ -139,10 +191,12 @@ def main():
     distance_threshold = 0.001
     view_disparity = 0.2
     limit = 1.2
+    length = 4
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
     adjust_normals = False
     specific_view = False
+    adjust_normals = False
     plane_near = 0
     plane_far = 6
 
@@ -247,10 +301,10 @@ def main():
                 if sample_density_1 < sample_density_2:
                     normals[index] *= (-1)
 
-        np.save(os.path.join(configargs.save_dir, "mesh_cache.npy"), (vertices, triangles, normals))
+        np.save("mesh_sample.npy", (vertices, triangles, normals))
         print("Saved successfully")
     else:
-        vertices, triangles, normals = np.load(os.path.join(configargs.save_dir, "mesh_cache.npy"), allow_pickle = True)
+        vertices, triangles, normals = np.load("mesh_sample.npy", allow_pickle = True)
 
     # Extracting the diffuse color
     # Ray targets
@@ -301,7 +355,8 @@ def main():
     diffuse = torch.cat(pred, dim = 0).numpy()
 
     # Export model
-    export_obj(vertices, triangles, diffuse, normals, os.path.join(configargs.save_dir, f"{model_name}.obj"))
+    export_obj(vertices, triangles, diffuse, normals, "lego.obj")
+
 
 if __name__ == "__main__":
     main()
