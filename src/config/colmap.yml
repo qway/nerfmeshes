@@ -1,7 +1,7 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: lego-lowres3
+  id: colmap
   # Experiment logs will be stored at "logdir"/"id"
   logdir: logs
   # Seed for random number generators (for repeatability).
@@ -18,24 +18,17 @@ experiment:
 # Dataset parameters.
 dataset:
   # Type of dataset (Blender vs LLFF vs DeepVoxels vs something else)
-  type: blender
+  type: colmap
   # Base directory of dataset.
-  basedir: ../data/nerf_synthetic/lego
-  # Optionally, provide a path to the pre-cached dataset dir. This
-  # overrides the other dataset options.
-  cachedir: cache/legocache200
-  # For the Blender datasets (synthetic), optionally return images
-  # at half the original resolution of 800 x 800, to save space.
-  half_res: True
-  # Stride (include one per "testskip" images in the dataset).
-  testskip: 1
+  basedir: ../data/nerf_tree/
   # Do not use NDC (normalized device coordinates). Usually True for
   # synthetic (Blender) datasets.
   no_ndc: True
   # Near clip plane (clip all depth values closer than this threshold).
-  near: 2
+  near: 0.2
   # Far clip plane (clip all depth values farther than this threshold).
-  far: 6
+  far: 10
+  resolution: 0.2
 
 # Model parameters.
 models:
@@ -44,7 +37,7 @@ models:
   coarse_type: FlexibleNeRFModel
   coarse:
     # Number of layers in the model.
-    num_layers: 8
+    num_layers: 4
     # Number of hidden units in each layer of the MLP (multi-layer
     # perceptron).
     hidden_size: 128
@@ -71,7 +64,6 @@ models:
     # of the direction.
     log_sampling_dir: True
   # Fine model.
-  # Name of the torch.nn.Module class that implements the model.
   fine_type: FlexibleNeRFModel
   fine:
     # Number of layers in the model.
@@ -111,10 +103,9 @@ optimizer:
  
 # Learning rate schedule.
 scheduler:
-  # Exponentially decay learning rate (in 1000 steps)
-  lr_decay: 250
-  # Rate at which to apply this decay.
-  lr_decay_factor: 0.1
+  type: ReduceLROnPlateau
+  options:
+    mode: min
 
 # NeRF parameters.
 nerf:
@@ -128,7 +119,7 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 8192  # 32 * 32 * 4
+    num_random_rays: 4096  # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
     chunksize: 8192  # 131072  # 1024 * 32

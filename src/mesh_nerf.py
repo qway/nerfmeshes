@@ -86,18 +86,18 @@ def main():
 
     # Mesh Extraction
     N = 256
-    iso_value = 32
+    iso_value = 0
     batch_size = 1024
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
     distance_length = 0.001
     distance_threshold = 0.001
-    limit = 1.2
+    limit = 10.2
     view_disparity = 2 * limit / N
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
     adjust_normals = False
-    specific_view = True
+    specific_view = False
 
     vertices, triangles, normals, diffuse = None, None, None, None
     if configargs.cache_mesh:
@@ -123,6 +123,9 @@ def main():
 
         # Create a 3D density grid
         grid_alpha = density.reshape((N, N, N))
+        # Dynamic iso-value, should be slightly over zero
+        iso_value = np.maximum(grid_alpha, 0).mean()
+        print("Dynamic Iso-Value:", iso_value)
 
         # Extracting iso-surface triangulated
         vertices, triangles, normals, values = measure.marching_cubes(

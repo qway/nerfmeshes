@@ -38,6 +38,9 @@ class PositionalEncoding(torch.nn.Module):
         encoding = torch.cat(input + [torch.sin(x), torch.cos(x)], dim=-1)
         return encoding
 
+    def output_size(self):
+        return 2 * 3 * self.num_encoding_functions + (3 if self.include_input else 0)
+
 
 class VolumeRenderer(torch.nn.Module):
     def __init__(
@@ -205,3 +208,40 @@ class SamplePDF(torch.nn.Module):
         samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
 
         return samples
+
+
+class SimpleModule(torch.nn.Module):
+    def __init__(self, in_features, out_features, activation=torch.nn.ReLU()):
+        super(SimpleModule, self).__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+        self.activation = activation
+
+    def forward(self, x):
+        return self.activation(self.linear(x))
+
+class SkipModule(torch.nn.Module):
+    def __init__(self, in_features, out_features, activation=torch.nn.ReLU()):
+        super(SkipModule, self).__init__()
+        self.linear1 = torch.nn.Linear(in_features, out_features, activation)
+        self.linear2 = torch.nn.Linear(out_features, out_features, activation)
+        self.linear3 = torch.nn.Linear(in_features + out_features, out_features, activation)
+
+    def forward(self, x):
+        x1 = self.linear1(x)
+        x1 = self.linear2(x1)
+        x = torch.cat((x,x1), dim=-1)
+        return self.linear3(x)
+
+
+
+class SimpleLuminance(torch.nn.Module):
+    def __init__(self):
+        super(SimpleLuminance, self).__init__()
+
+    def forward(self, color, luminance):
+        return color + luminance
+
+
+def get_luminance_function(func):
+    if func == "simple":
+        return SimpleLuminance()

@@ -15,7 +15,8 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 from typing import Tuple
 
-from data.datasets import BlenderRayDataset, BlenderImageDataset, ScanNetDataset
+from data.datasets import BlenderRayDataset, BlenderImageDataset, ScanNetDataset, \
+    ColmapDataset
 from data.load_scannet import SensorData
 from nerf import models, CfgNode, mse2psnr, VolumeRenderer, RaySampleInterval, SamplePDF
 import numpy as np
@@ -39,6 +40,19 @@ def flatten_dict(d, parent_key="", sep="_"):
             items.append((new_key, v))
     return dict(items)
 
+def nest_dict(flat, sep="_"):
+    result = {}
+    for k, v in flat.items():
+        _nest_dict_rec(k, v, result, sep)
+    return result
+
+def _nest_dict_rec(k, v, out, sep="_"):
+    k, *rest = k.split(sep, 1)
+    if rest:
+        _nest_dict_rec(rest[0], v, out.setdefault(k, {}), sep)
+    else:
+        out[k] = v
+
 
 def cast_to_image(tensor):
     # Input tensor is (H, W, 3). Convert to (3, H, W).
@@ -52,23 +66,11 @@ def cast_to_image(tensor):
 
 def create_models(cfg) -> Tuple[torch.nn.Module, torch.nn.Module]:
     # Initialize a coarse-resolution model.
-    model_coarse = getattr(models, cfg.models.coarse.type)(
-        num_encoding_fn_xyz=cfg.models.coarse.num_encoding_fn_xyz,
-        num_encoding_fn_dir=cfg.models.coarse.num_encoding_fn_dir,
-        include_input_xyz=cfg.models.coarse.include_input_xyz,
-        include_input_dir=cfg.models.coarse.include_input_dir,
-        use_viewdirs=cfg.models.coarse.use_viewdirs,
-    )
+    model_coarse = getattr(models, cfg.models.coarse_type)(**cfg.models.coarse)
     # If a fine-resolution model is specified, initialize it.
     model_fine = None
     if hasattr(cfg.models, "fine"):
-        model_fine = getattr(models, cfg.models.fine.type)(
-            num_encoding_fn_xyz=cfg.models.fine.num_encoding_fn_xyz,
-            num_encoding_fn_dir=cfg.models.fine.num_encoding_fn_dir,
-            include_input_xyz=cfg.models.fine.include_input_xyz,
-            include_input_dir=cfg.models.fine.include_input_dir,
-            use_viewdirs=cfg.models.fine.use_viewdirs,
-        )
+        model_fine = getattr(models, cfg.models.fine_type)(**cfg.models.fine)
     return model_coarse, model_fine
 
 
@@ -124,8 +126,12 @@ def get_ray_batch(ray_batch):
 class NeRFModel(LightningModule):
     def __init__(self, cfg, hparams=None, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.cfg = cfg
-        self.hparams = flatten_dict(cfg, sep=".")
+        if hparams:
+            self.cfg = CfgNode(nest_dict(hparams, sep="."))
+            self.hparams = hparams
+        else:
+            self.cfg = cfg
+            self.hparams = flatten_dict(cfg, sep=".")
         self.dataset_basepath = Path(cfg.dataset.basedir)
 
         self.loss = torch.nn.MSELoss()
@@ -186,7 +192,7 @@ class NeRFModel(LightningModule):
 
         return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
 
-    def sample_points(self, points, rays):
+    def sample_points(self, points, rays=None):
         model = self.model_coarse
         if self.model_fine:
             model = self.model_fine
@@ -214,6 +220,7 @@ class NeRFModel(LightningModule):
             "train/loss": loss.item(),
             "train/coarse_loss": coarse_loss.item(),
             "train/psnr": psnr.item(),
+            #"lr": self.optimizers[0].param_groups[0]['lr'].item()
         }
         if rgb_fine is not None:
             log_vals["train/fine_loss"] = fine_loss.item()
@@ -272,7 +279,7 @@ class NeRFModel(LightningModule):
         psnr = mse2psnr(loss)
 
         self.logger.experiment.add_image(
-            "validation/rgb_coarse",
+            "validation/rgb_coarse/"+str(batch_idx),
             cast_to_image(
                 rgb_coarse[..., :3].view(self.val_dataset.H, self.val_dataset.W, 3)
             ),
@@ -280,14 +287,14 @@ class NeRFModel(LightningModule):
         )
         if rgb_fine is not None:
             self.logger.experiment.add_image(
-                "validation/rgb_fine",
+                "validation/rgb_fine/"+str(batch_idx),
                 cast_to_image(
                     rgb_fine[..., :3].view(self.val_dataset.H, self.val_dataset.W, 3)
                 ),
                 self.global_step,
             )
         self.logger.experiment.add_image(
-            "validation/img_target",
+            "validation/img_target/"+str(batch_idx),
             cast_to_image(
                 ray_targets[..., :3].view(self.val_dataset.H, self.val_dataset.W, 3)
             ),
@@ -327,14 +334,27 @@ class NeRFModel(LightningModule):
             )
         elif self.cfg.dataset.type == "scannet":
             if not self.sensor_data:
-                self.sensor_data = SensorData(self.dataset_basepath / (self.dataset_basepath.name + ".sens"))
+                self.sensor_data = SensorData(
+                    self.dataset_basepath / (self.dataset_basepath.name + ".sens")
+                )
             self.train_dataset = ScanNetDataset(
                 self.sensor_data,
                 num_random_rays=self.cfg.nerf.train.num_random_rays,
                 near=cfg.dataset.near,
                 far=cfg.dataset.far,
-                stop=100, # Debug by loading only small part of the dataset
+                stop=1000,  # Debug by loading only small part of the dataset
                 skip_every=10000,
+                scale=cfg.dataset.scale_factor,
+                resolution=cfg.dataset.resolution
+            )
+        elif self.cfg.dataset.type == "colmap":
+            self.train_dataset = ColmapDataset(
+                self.cfg.dataset.basedir,
+                num_random_rays=self.cfg.nerf.train.num_random_rays,
+                near=cfg.dataset.near,
+                far=cfg.dataset.far,
+                start=1,  # Debug by loading only small part of the dataset
+                resolution=cfg.dataset.resolution
             )
 
         train_dataloader = DataLoader(self.train_dataset, batch_size=1, shuffle=True)
@@ -352,21 +372,38 @@ class NeRFModel(LightningModule):
             )
         elif self.cfg.dataset.type == "scannet":
             if not self.sensor_data:
-                self.sensor_data = SensorData(self.dataset_basepath / (self.dataset_basepath.name + ".sens"))
+                self.sensor_data = SensorData(
+                    self.dataset_basepath / (self.dataset_basepath.name + ".sens")
+                )
             self.val_dataset = ScanNetDataset(
                 self.sensor_data,
                 near=cfg.dataset.near,
                 far=cfg.dataset.far,
-                stop=10, # Debug by loading only small part of the dataset
-                skip=100
+                stop=10,  # Debug by loading only small part of the dataset
+                skip=100,
+                scale=cfg.dataset.scale_factor,
+                resolution=cfg.dataset.resolution
+            )
+        elif self.cfg.dataset.type == "colmap":
+            self.val_dataset = ColmapDataset(
+                self.cfg.dataset.basedir,
+                num_random_rays=-1,
+                near=cfg.dataset.near,
+                far=cfg.dataset.far,
+                stop=2,  # Debug by loading only small part of the dataset
+                resolution=cfg.dataset.resolution
             )
         val_dataloader = DataLoader(self.val_dataset, batch_size=None)
         return val_dataloader
 
     def configure_optimizers(self):
-        return getattr(torch.optim, self.cfg.optimizer.type)(
+        optimizer = getattr(torch.optim, self.cfg.optimizer.type)(
             self.parameters(), lr=self.cfg.optimizer.lr
         )
+        scheduler = getattr(torch.optim.lr_scheduler, self.cfg.scheduler.type)(
+            optimizer, **self.cfg.scheduler.options
+        )
+        return [optimizer], [scheduler]
 
 
 if __name__ == "__main__":
@@ -395,11 +432,13 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     seed_everything(cfg.experiment.randomseed)
 
-    logdir = Path("../logs") / (cfg.experiment.id + time.strftime("_%y-%m-%d-%H:%M"))
+    logdir = Path("../logs") / (cfg.experiment.id)
     os.makedirs(logdir, exist_ok=True)
-    with open(os.path.join(logdir, "config.yml"), "w") as f:
-        f.write(cfg.dump())  # cfg, f, default_flow_style=False)
-    logger = TensorBoardLogger(logdir)
+    log_time = str(time.strftime("%y-%m-%d-%H:%M"))
+    logger = TensorBoardLogger(logdir, "", log_time)
+    logdir = logdir / log_time
+    #with open(os.path.join(logdir, "config.yml"), "w") as f:
+    #   f.write(cfg.dump())  # cfg, f, default_flow_style=False)
     logger.experiment.add_text("config", cfg.dump(), 0)
     checkpoint_callback = ModelCheckpoint(
         filepath=logdir,
@@ -411,7 +450,7 @@ if __name__ == "__main__":
     )
     trainer = Trainer(
         gpus=configargs.gpus,
-        #val_check_interval=cfg.experiment.validate_every,
+        # val_check_interval=cfg.experiment.validate_every,
         default_root_dir="../logs",
         logger=logger,
         checkpoint_callback=checkpoint_callback,
@@ -420,8 +459,7 @@ if __name__ == "__main__":
         max_steps=cfg.experiment.train_iters,
         # log_gpu_memory=True,
         deterministic=True,
-        accumulate_grad_batches=2,
+        accumulate_grad_batches=8,
     )
     model = NeRFModel(cfg)
-
     trainer.fit(model)

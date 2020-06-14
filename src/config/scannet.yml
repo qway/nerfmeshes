@@ -30,16 +30,18 @@ dataset:
   # synthetic (Blender) datasets.
   no_ndc: True
   # Near clip plane (clip all depth values closer than this threshold).
-  near: 0.2
+  near: 0.1
   # Far clip plane (clip all depth values farther than this threshold).
-  far: 10
+  far: 1
+  scale_factor: 1
+  resolution: 0.25
 
 # Model parameters.
 models:
   # Coarse model.
+  # Name of the torch.nn.Module class that implements the model.
+  coarse_type: FlexibleNeRFModel
   coarse:
-    # Name of the torch.nn.Module class that implements the model.
-    type: FlexibleNeRFModel
     # Number of layers in the model.
     num_layers: 4
     # Number of hidden units in each layer of the MLP (multi-layer
@@ -68,9 +70,8 @@ models:
     # of the direction.
     log_sampling_dir: True
   # Fine model.
+  fine_type: FlexibleNeRFModel
   fine:
-    # Name of the torch.nn.Module class that implements the model.
-    type: FlexibleNeRFModel
     # Number of layers in the model.
     num_layers: 8
     # Number of hidden units in each layer of the MLP (multi-layer
@@ -108,10 +109,9 @@ optimizer:
  
 # Learning rate schedule.
 scheduler:
-  # Exponentially decay learning rate (in 1000 steps)
-  lr_decay: 250
-  # Rate at which to apply this decay.
-  lr_decay_factor: 0.1
+  type: ReduceLROnPlateau
+  options:
+    mode: min
 
 # NeRF parameters.
 nerf:
@@ -125,7 +125,7 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 8192  # 32 * 32 * 4
+    num_random_rays: 4096  # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
     chunksize: 8192  # 131072  # 1024 * 32
