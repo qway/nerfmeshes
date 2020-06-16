@@ -20,7 +20,7 @@ from nerf import (
     get_embedding_function,
     predict_and_render_radiance,
 )
-from train_nerf import NeRFModel
+from train_nerf import NeRFModel, nest_dict
 
 
 def export_obj(vertices, triangles, diffuse, normals, filename):
@@ -47,16 +47,13 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--config", type=str, required=True, help="Path to (.yml) config file."
+        "folder", type=str, help="Path to Log Folder"
     )
     parser.add_argument(
-        "--base-dir", type=str, required=False, help="Override the default base dir.",
-    )
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
-        help="Checkpoint / pre-trained model to evaluate.",
+        "--limit",
+        type=float,
+        help="Limits in -xyz to xyz for mcubes.",
+        default=1.0
     )
     parser.add_argument(
         "--save-dir",
@@ -69,39 +66,42 @@ def main():
     parser.add_argument("--no-cache-mesh", dest="cache_mesh", action="store_false")
     parser.set_defaults(cache_mesh=True)
 
-    configargs = parser.parse_args()
-    cfg, model_name = None, None
-    with open(configargs.config, "r") as f:
-        cfg_dict = yaml.load(f, Loader=yaml.FullLoader)
-        cfg, model_name = CfgNode(cfg_dict), Path(f.name).stem
+
+    args = parser.parse_args()
+    log_folder = Path(args.folder)
+    with (log_folder / "hparams.yaml").open() as f:
+        hparams = yaml.load(f, Loader=yaml.FullLoader)
+        cfg = CfgNode(nest_dict(hparams, sep="."))
 
     if torch.cuda.is_available():
         device = torch.cuda.current_device()
     else:
         device = "cpu"
-
-    checkpoint_path = next(Path(configargs.checkpoint).glob('*.ckpt'))
+    try:
+        checkpoint_path = next(log_folder.glob('*.ckpt'))
+    except:
+        raise FileNotFoundError("Could not find a .ckpt file in folder ", args.checkpoint)
     model = NeRFModel.load_from_checkpoint(checkpoint_path, cfg=cfg)
     model.eval()
     model.to(device)
 
     # Mesh Extraction
-    N = 256
+    N = 128
     iso_value = 0
     batch_size = 512
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
     distance_length = 0.001
     distance_threshold = 0.001
-    limit = 0.35
+    limit = args.limit
     view_disparity = 2 * limit / N
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
     adjust_normals = False
-    specific_view = False
+    specific_view = True
 
     vertices, triangles, normals, diffuse = None, None, None, None
-    if configargs.cache_mesh:
+    if args.cache_mesh:
         print("Generating mesh geometry...")
         query_pts = np.stack(np.meshgrid(t, t, t), -1).astype(np.float32)
         pts = torch.from_numpy(query_pts)
@@ -116,7 +116,12 @@ def main():
             result_batch = model.sample_points(
                 batch, batch
             )  # Reuse positions as fake rays
-
+            # Unpack if tuple with luminance
+            if isinstance(result_batch, tuple):
+                result_batch, _ = result_batch
+                has_luminance = True
+            else:
+                has_luminance = False
             # Extracting the density
             density[idx * batch_size : (idx + 1) * batch_size] = (
                 result_batch[..., 3].cpu().detach().numpy()
@@ -204,14 +209,14 @@ def main():
                     normals[index] *= -1
 
         np.save(
-            os.path.join(configargs.save_dir, "mesh_cache.npy"),
+            os.path.join(args.save_dir, "mesh_cache.npy"),
             (vertices, triangles, normals),
         )
         print("Mesh geometry saved successfully")
     else:
         print("Loading mesh geometry...")
         vertices, triangles, normals = np.load(
-            os.path.join(configargs.save_dir, "mesh_cache.npy"), allow_pickle=True
+            os.path.join(args.save_dir, "mesh_cache.npy"), allow_pickle=True
         )
 
     print("Generating mesh texture...")
@@ -231,7 +236,8 @@ def main():
             pos_batch = targets[offset1:offset2].to(device)
             normal_batch = inv_normals[offset1:offset2].to(device)
 
-            result_batch = model.sample_points(pos_batch, normal_batch)
+            result_batch = model.sample_points(pos_batch, normal_batch, only_luminance=True)
+            #result_batch = model.sample_points(pos_batch, None)
 
             # Current color hack since the network does not normalize colors
             result_batch = torch.sigmoid(result_batch[..., :3]) * 255
@@ -257,12 +263,20 @@ def main():
             pos_batch = ray_origins[offset1:offset2].to(device)
             normal_batch = inv_normals[offset1:offset2].to(device)
             ray_bounds_batch = ray_bounds[: offset2 - offset1]
-            _, _, _, diffuse, _, _ = model((pos_batch, normal_batch, ray_bounds_batch))
+            if has_luminance:
+                _, _, _, diffuse, _, _, _ = model((pos_batch, normal_batch, ray_bounds_batch))
+            else:
+                _, _, _, diffuse, _, _ = model((pos_batch, normal_batch, ray_bounds_batch))
+
 
             pred.append(diffuse.cpu().detach())
 
         # Query the whole diffuse map
         diffuse = torch.cat(pred, dim=0).numpy()
+
+    # If diffuse should be normalized
+    #diff_range = diffuse.max() -diffuse.min()
+    #diffuse = (diffuse - diffuse.min()) /diff_range * 255
 
     # Export model
     print("Saving final model...", end="")
@@ -271,7 +285,7 @@ def main():
         triangles,
         diffuse,
         normals,
-        os.path.join(configargs.save_dir, f"{model_name}.obj"),
+        os.path.join(args.save_dir, "mesh.obj"),
     )
     print("Saved!")
 

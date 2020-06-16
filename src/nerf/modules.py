@@ -77,7 +77,8 @@ class VolumeRenderer(torch.nn.Module):
         )
         dists = dists * ray_directions[..., None, :].norm(p=2, dim=-1)
 
-        rgb = torch.sigmoid(radiance_field[..., :3])
+        #rgb = torch.sigmoid(radiance_field[..., :3])
+        rgb = radiance_field[..., :3]
         noise = 0.0
         if radiance_field_noise_std > 0.0:
             noise = (
@@ -232,6 +233,27 @@ class SkipModule(torch.nn.Module):
         x = torch.cat((x,x1), dim=-1)
         return self.linear3(x)
 
+class MultiSkipModule(torch.nn.Module):
+    def __init__(self, hidden_size, skip_size, layer_count, skip_count=1, basic_module=SimpleModule):
+        super(MultiSkipModule, self).__init__()
+        self.hidden_layers = torch.nn.ModuleList(
+            [basic_module(hidden_size + skip_size, hidden_size) for
+              _ in range(layer_count)]
+        )
+
+        self.skip_layers = torch.nn.ModuleList([torch.nn.ModuleList(
+            [basic_module(hidden_size, hidden_size) for _ in range(skip_count)]
+        ) for _ in range(layer_count)])
+
+    def forward(self, x, skip_value):
+        value = x
+        for hlayer, skiplayer in zip(self.hidden_layers, self.skip_layers):
+            value = torch.cat([value, skip_value], dim=-1)
+            value = hlayer(value)
+            for layer in skiplayer:
+                value = layer(value)
+        return value
+
 
 
 class SimpleLuminance(torch.nn.Module):
@@ -241,7 +263,33 @@ class SimpleLuminance(torch.nn.Module):
     def forward(self, color, luminance):
         return color + luminance
 
+class MultiplyLuminance(torch.nn.Module):
+    def __init__(self):
+        super(MultiplyLuminance, self).__init__()
+
+    def forward(self, color, luminance):
+        return color * (1 + luminance)
+
+class NoLuminance(torch.nn.Module):
+    def __init__(self):
+        super(NoLuminance, self).__init__()
+
+    def forward(self, color, luminance):
+        return color
+
+class FillUpLuminance(torch.nn.Module):
+    def __init__(self):
+        super(FillUpLuminance, self).__init__()
+
+    def forward(self, color, luminance):
+        return color + (1-color)*luminance
 
 def get_luminance_function(func):
     if func == "simple":
         return SimpleLuminance()
+    elif func == "disabled":
+        return NoLuminance()
+    elif func == "multiply":
+        return MultiplyLuminance()
+    elif func == "fillup":
+        return FillUpLuminance()

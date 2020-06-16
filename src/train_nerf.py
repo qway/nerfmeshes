@@ -135,6 +135,7 @@ class NeRFModel(LightningModule):
         self.dataset_basepath = Path(cfg.dataset.basedir)
 
         self.loss = torch.nn.MSELoss()
+        self.lumi_lambda = cfg.nerf.train.lumi_lambda
 
         self.model_coarse, self.model_fine = create_models(cfg)
         self.volume_renderer = VolumeRenderer(
@@ -185,23 +186,26 @@ class NeRFModel(LightningModule):
             )
             # Expand rays to match batchsize
             expanded_ray_directions = ray_directions[..., None, :].expand_as(raypoints)
-            fine_radiance_field = self.model_fine(raypoints, expanded_ray_directions)
+            fine_radiance_field, lumi_fine = self.model_fine(raypoints, expanded_ray_directions)
             rgb_fine, disp_fine, acc_fine, _, _ = self.volume_renderer(
                 fine_radiance_field, ray_intervals, ray_directions
             )
 
-        return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
+        return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine, lumi_fine
 
-    def sample_points(self, points, rays=None):
+    def sample_points(self, points, rays=None, **kwargs):
         model = self.model_coarse
         if self.model_fine:
             model = self.model_fine
-        return model(points, rays)
+        results = model(points, rays, **kwargs)
+        if isinstance(results,tuple):
+            return results[0]
+        return results
 
     def training_step(self, ray_batch, batch_idx):
         ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(ray_batch)
 
-        rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
+        rgb_coarse, _, _, rgb_fine, _, _, lumi_fine = self.forward(
             (ray_origins, ray_directions, bounds)
         )
 
@@ -209,12 +213,16 @@ class NeRFModel(LightningModule):
 
         if rgb_fine is not None:
             fine_loss = self.loss(rgb_fine[..., :3], ray_targets[..., :3])
-            loss = coarse_loss + fine_loss
+            lumi_loss = torch.mean(torch.norm(lumi_fine, dim=1))
+            mse_loss = coarse_loss + fine_loss
+            loss = mse_loss +  self.lumi_lambda * lumi_loss
         else:
             fine_loss = None
+            mse_loss = None
+            lumi_loss = None
             loss = coarse_loss
 
-        psnr = mse2psnr(loss)
+        psnr = mse2psnr(fine_loss)
 
         log_vals = {
             "train/loss": loss.item(),
@@ -224,6 +232,9 @@ class NeRFModel(LightningModule):
         }
         if rgb_fine is not None:
             log_vals["train/fine_loss"] = fine_loss.item()
+            log_vals["train/mse_loss"] = mse_loss.item()
+            log_vals["train/lumi_loss"] = lumi_loss.item()
+
 
         output = {
             "loss": loss,
@@ -246,7 +257,7 @@ class NeRFModel(LightningModule):
         all_rgb_coarse = []
         all_rgb_fine = []
         for i in range(0, ray_origins.shape[0], batchsize):
-            rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
+            rgb_coarse, _, _, rgb_fine, _, _, _ = self.forward(
                 (
                     ray_origins[i : i + batchsize],
                     ray_directions[i : i + batchsize],
@@ -366,7 +377,7 @@ class NeRFModel(LightningModule):
                 self.cfg.dataset.far,
                 shuffle=True,
                 white_background=self.cfg.nerf.train.white_background,
-                stop=10,  #  Debug by only loading a small part of the dataset
+                stop=3,  #  Debug by only loading a small part of the dataset
             )
         elif self.cfg.dataset.type == "scannet":
             if not self.sensor_data:
@@ -455,7 +466,7 @@ if __name__ == "__main__":
         max_steps=cfg.experiment.train_iters,
         # log_gpu_memory=True,
         deterministic=True,
-        accumulate_grad_batches=8,
+        accumulate_grad_batches=2,
     )
     model = NeRFModel(cfg)
     trainer.fit(model)

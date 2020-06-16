@@ -44,7 +44,7 @@ models:
   coarse_type: SimpleModel
   coarse:
     # Number of layers in the model.
-    hidden_layers: 3
+    hidden_layers: 2
     # Number of view dependent layers(-1 for no view dependence)
     hidden_layers_view: -1
     # Size of the hidden layers
@@ -68,16 +68,16 @@ models:
     log_sampling_dir: True
   # Fine model.
   # Name of the torch.nn.Module class that implements the model.
-  fine_type: ViewLuminanceModel
+  fine_type: ViewLuminanceModelSkip
   fine:
     # Number of layers in the model.
-    hidden_layers: 2
+    hidden_layers: 4
     # Number of view dependent layers(-1 for no view dependence)
     hidden_layers_view: 1
     # Size of the hidden layers
     hidden_size: 128
     # What kind of function to model luminance should be used.
-    luminance_function: simple
+    luminance_function: fillup
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -138,6 +138,8 @@ nerf:
     radiance_field_noise_std: 0.2
     # Sample linearly in disparity space, as opposed to in depth space.
     lindisp: False
+    # Amount of regularization on luminance
+    lumi_lambda: 0.0001
   # Validation-specific parameters.
   validation:
     # Number of random rays to retain from each image.
