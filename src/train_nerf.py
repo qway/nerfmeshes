@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from typing import Tuple
 
 from data.datasets import BlenderRayDataset, BlenderImageDataset, ScanNetDataset, \
-    ColmapDataset
+    ColmapDataset, LLFFColmapDataset
 from data.load_scannet import SensorData
 from nerf import models, CfgNode, mse2psnr, VolumeRenderer, RaySampleInterval, SamplePDF
 import numpy as np
@@ -220,7 +220,7 @@ class NeRFModel(LightningModule):
             "train/loss": loss.item(),
             "train/coarse_loss": coarse_loss.item(),
             "train/psnr": psnr.item(),
-            #"lr": self.optimizers[0].param_groups[0]['lr'].item()
+            "train/lr": self.trainer.optimizers[0].param_groups[0]['lr']
         }
         if rgb_fine is not None:
             log_vals["train/fine_loss"] = fine_loss.item()
@@ -348,13 +348,11 @@ class NeRFModel(LightningModule):
                 resolution=cfg.dataset.resolution
             )
         elif self.cfg.dataset.type == "colmap":
-            self.train_dataset = ColmapDataset(
+            self.train_dataset = LLFFColmapDataset(
                 self.cfg.dataset.basedir,
                 num_random_rays=self.cfg.nerf.train.num_random_rays,
-                near=cfg.dataset.near,
-                far=cfg.dataset.far,
                 start=1,  # Debug by loading only small part of the dataset
-                resolution=cfg.dataset.resolution
+                downscale_factor=cfg.dataset.downscale_factor
             )
 
         train_dataloader = DataLoader(self.train_dataset, batch_size=1, shuffle=True)
@@ -385,13 +383,11 @@ class NeRFModel(LightningModule):
                 resolution=cfg.dataset.resolution
             )
         elif self.cfg.dataset.type == "colmap":
-            self.val_dataset = ColmapDataset(
+            self.val_dataset = LLFFColmapDataset(
                 self.cfg.dataset.basedir,
                 num_random_rays=-1,
-                near=cfg.dataset.near,
-                far=cfg.dataset.far,
                 stop=2,  # Debug by loading only small part of the dataset
-                resolution=cfg.dataset.resolution
+                downscale_factor=cfg.dataset.downscale_factor
             )
         val_dataloader = DataLoader(self.val_dataset, batch_size=None)
         return val_dataloader

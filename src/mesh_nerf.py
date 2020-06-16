@@ -80,19 +80,20 @@ def main():
     else:
         device = "cpu"
 
-    model = NeRFModel.load_from_checkpoint(configargs.checkpoint, cfg=cfg)
+    checkpoint_path = next(Path(configargs.checkpoint).glob('*.ckpt'))
+    model = NeRFModel.load_from_checkpoint(checkpoint_path, cfg=cfg)
     model.eval()
     model.to(device)
 
     # Mesh Extraction
     N = 256
     iso_value = 0
-    batch_size = 1024
+    batch_size = 512
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
     distance_length = 0.001
     distance_threshold = 0.001
-    limit = 10.2
+    limit = 0.35
     view_disparity = 2 * limit / N
     t = np.linspace(-limit, limit, N)
     sampling_method = 0

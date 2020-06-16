@@ -20,15 +20,15 @@ dataset:
   # Type of dataset (Blender vs LLFF vs DeepVoxels vs something else)
   type: colmap
   # Base directory of dataset.
-  basedir: ../data/nerf_tree/
+  basedir: ../data/succulent
   # Do not use NDC (normalized device coordinates). Usually True for
   # synthetic (Blender) datasets.
   no_ndc: True
   # Near clip plane (clip all depth values closer than this threshold).
-  near: 0.2
+  near: 1
   # Far clip plane (clip all depth values farther than this threshold).
-  far: 10
-  resolution: 0.2
+  far: 3
+  downscale_factor: 2
 
 # Model parameters.
 models:
@@ -76,7 +76,7 @@ models:
     skip_connect_every: 3
     # Number of encoding functions to use in the positional encoding
     # of the coordinates.
-    num_encoding_fn_xyz: 10
+    num_encoding_fn_xyz: 15
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -99,13 +99,14 @@ optimizer:
   # Name of the torch.optim class used for optimization.
   type: Adam
   # Learning rate.
-  lr: 5.0E-3
+  lr: 5.0E-4
  
 # Learning rate schedule.
 scheduler:
-  type: ReduceLROnPlateau
+  type: StepLR
   options:
-    mode: min
+    step_size: 1
+    gamma: 0.2
 
 # NeRF parameters.
 nerf:
@@ -119,7 +120,7 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 4096  # 32 * 32 * 4
+    num_random_rays: 2096  # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
     chunksize: 8192  # 131072  # 1024 * 32
@@ -128,7 +129,7 @@ nerf:
     # Number of depth samples per ray for the coarse network.
     num_coarse: 64
     # Number of depth samples per ray for the fine network.
-    num_fine: 64
+    num_fine: 128
     # Whether to render models using a white background.
     white_background: False
     # Standard deviation of noise to be added to the radiance field when
