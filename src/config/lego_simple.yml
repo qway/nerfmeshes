@@ -1,7 +1,7 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: lego-luminance
+  id: lego-simple
   # Experiment logs will be stored at "logdir"/"id"
   logdir: logs
   # Seed for random number generators (for repeatability).
@@ -9,7 +9,7 @@ experiment:
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 3000
+  validate_every: 10000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -44,7 +44,7 @@ models:
   coarse_type: SimpleModel
   coarse:
     # Number of layers in the model.
-    hidden_layers: 2
+    hidden_layers: 3
     # Number of view dependent layers(-1 for no view dependence)
     hidden_layers_view: -1
     # Size of the hidden layers
@@ -68,16 +68,14 @@ models:
     log_sampling_dir: True
   # Fine model.
   # Name of the torch.nn.Module class that implements the model.
-  fine_type: ViewLuminanceModelSkip
+  fine_type: SimpleModel
   fine:
     # Number of layers in the model.
-    hidden_layers: 4
+    hidden_layers: 5
     # Number of view dependent layers(-1 for no view dependence)
-    hidden_layers_view: 1
+    hidden_layers_view: -1
     # Size of the hidden layers
     hidden_size: 128
-    # What kind of function to model luminance should be used.
-    luminance_function: fillup
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -121,7 +119,7 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 2048 # 32 * 32 * 4
+    num_random_rays: 4096 # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
     chunksize: 2048  # 131072  # 1024 * 32

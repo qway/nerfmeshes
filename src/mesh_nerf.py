@@ -56,6 +56,12 @@ def main():
         default=1.0
     )
     parser.add_argument(
+        "--res",
+        type=int,
+        help="Sampling resolution for mcubes.",
+        default=128
+    )
+    parser.add_argument(
         "--save-dir",
         type=str,
         help="Save mesh to this directory, if specified.",
@@ -86,8 +92,8 @@ def main():
     model.to(device)
 
     # Mesh Extraction
-    N = 128
-    iso_value = 0
+    N = args.res
+    iso_value = 36
     batch_size = 512
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
@@ -98,7 +104,7 @@ def main():
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
     adjust_normals = False
-    specific_view = True
+    specific_view = False
 
     vertices, triangles, normals, diffuse = None, None, None, None
     if args.cache_mesh:
@@ -116,12 +122,7 @@ def main():
             result_batch = model.sample_points(
                 batch, batch
             )  # Reuse positions as fake rays
-            # Unpack if tuple with luminance
-            if isinstance(result_batch, tuple):
-                result_batch, _ = result_batch
-                has_luminance = True
-            else:
-                has_luminance = False
+
             # Extracting the density
             density[idx * batch_size : (idx + 1) * batch_size] = (
                 result_batch[..., 3].cpu().detach().numpy()
@@ -130,8 +131,9 @@ def main():
         # Create a 3D density grid
         grid_alpha = density.reshape((N, N, N))
         # Dynamic iso-value, should be slightly over zero
-        iso_value = np.maximum(grid_alpha, 0).mean()
-        print("Dynamic Iso-Value:", iso_value)
+        if iso_value is None:
+            iso_value = np.maximum(grid_alpha, 0).mean()
+        print("Iso-Value:", iso_value)
 
         # Extracting iso-surface triangulated
         vertices, triangles, normals, values = measure.marching_cubes(
@@ -236,11 +238,11 @@ def main():
             pos_batch = targets[offset1:offset2].to(device)
             normal_batch = inv_normals[offset1:offset2].to(device)
 
-            result_batch = model.sample_points(pos_batch, normal_batch, only_luminance=True)
+            result_batch = model.sample_points(pos_batch, normal_batch)
             #result_batch = model.sample_points(pos_batch, None)
 
             # Current color hack since the network does not normalize colors
-            result_batch = torch.sigmoid(result_batch[..., :3]) * 255
+            result_batch = result_batch[..., :3] * 255
             # Query the whole diffuse map
             diffuse[offset1:offset2] = result_batch[..., :3].cpu().detach().numpy()
     if not specific_view:
@@ -263,10 +265,8 @@ def main():
             pos_batch = ray_origins[offset1:offset2].to(device)
             normal_batch = inv_normals[offset1:offset2].to(device)
             ray_bounds_batch = ray_bounds[: offset2 - offset1]
-            if has_luminance:
-                _, _, _, diffuse, _, _, _ = model((pos_batch, normal_batch, ray_bounds_batch))
-            else:
-                _, _, _, diffuse, _, _ = model((pos_batch, normal_batch, ray_bounds_batch))
+
+            _, _, _, diffuse, _, _ = model((pos_batch, normal_batch, ray_bounds_batch))
 
 
             pred.append(diffuse.cpu().detach())

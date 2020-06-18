@@ -302,6 +302,15 @@ def sample_pdf_2(bins, weights, num_samples, det=False):
     return samples
 
 
+def insert_from_seachsorted(x, v, indices):
+    new_indices = indices + torch.arange(v.shape[-1], dtype=indices.dtype, device=indices.device)
+    old_mask = torch.ones((*v.shape[:-1], x.shape[-1] + v.shape[-1]), dtype=bool)
+    old_mask[new_indices] = False
+    new_data = torch.empty((*x.shape[:-1], x.shape[-1] + v.shape[-1]), dtype=x.dtype)
+    new_data[old_mask] = x
+    new_data[new_indices] = v
+    return new_data
+
 if __name__ == "__main__":
 
     # # meshgrid_xy

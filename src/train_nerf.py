@@ -15,10 +15,13 @@ from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 from typing import Tuple
 
+from torchsearchsorted import searchsorted
+
 from data.datasets import BlenderRayDataset, BlenderImageDataset, ScanNetDataset, \
     ColmapDataset, LLFFColmapDataset
 from data.load_scannet import SensorData
-from nerf import models, CfgNode, mse2psnr, VolumeRenderer, RaySampleInterval, SamplePDF
+from nerf import models, CfgNode, mse2psnr, VolumeRenderer, RaySampleInterval, \
+    SamplePDF, DensityExtractor, insert_from_seachsorted
 import numpy as np
 
 
@@ -135,7 +138,7 @@ class NeRFModel(LightningModule):
         self.dataset_basepath = Path(cfg.dataset.basedir)
 
         self.loss = torch.nn.MSELoss()
-        self.lumi_lambda = cfg.nerf.train.lumi_lambda
+        #self.lumi_lambda = cfg.nerf.train.lumi_lambda
 
         self.model_coarse, self.model_fine = create_models(cfg)
         self.volume_renderer = VolumeRenderer(
@@ -180,18 +183,19 @@ class NeRFModel(LightningModule):
         ) = self.volume_renderer(coarse_radiance_field, ray_intervals, ray_directions,)
         rgb_fine, disp_fine, acc_fine = None, None, None
         if nerf_cfg.num_fine > 0 and self.model_fine:
-            ray_intervals = self.sample_pdf(ray_intervals, weights, nerf_cfg.perturb)
+            fine_ray_intervals = self.sample_pdf(ray_intervals, weights, nerf_cfg.perturb)
             raypoints = intervals_to_raypoints(
-                ray_intervals, ray_directions, ray_origins
+                fine_ray_intervals, ray_directions, ray_origins
             )
             # Expand rays to match batchsize
             expanded_ray_directions = ray_directions[..., None, :].expand_as(raypoints)
-            fine_radiance_field, lumi_fine = self.model_fine(raypoints, expanded_ray_directions)
+            fine_radiance_field = self.model_fine(raypoints, expanded_ray_directions)
+
             rgb_fine, disp_fine, acc_fine, _, _ = self.volume_renderer(
-                fine_radiance_field, ray_intervals, ray_directions
+                fine_radiance_field, fine_ray_intervals, ray_directions
             )
 
-        return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine, lumi_fine
+        return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
 
     def sample_points(self, points, rays=None, **kwargs):
         model = self.model_coarse
@@ -205,7 +209,7 @@ class NeRFModel(LightningModule):
     def training_step(self, ray_batch, batch_idx):
         ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(ray_batch)
 
-        rgb_coarse, _, _, rgb_fine, _, _, lumi_fine = self.forward(
+        rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
             (ray_origins, ray_directions, bounds)
         )
 
@@ -213,9 +217,10 @@ class NeRFModel(LightningModule):
 
         if rgb_fine is not None:
             fine_loss = self.loss(rgb_fine[..., :3], ray_targets[..., :3])
-            lumi_loss = torch.mean(torch.norm(lumi_fine, dim=1))
+            #lumi_loss = torch.mean(torch.norm(lumi_fine, dim=1))
+            #mse_loss = coarse_loss + fine_loss
             mse_loss = coarse_loss + fine_loss
-            loss = mse_loss +  self.lumi_lambda * lumi_loss
+            loss = mse_loss #+  self.lumi_lambda * lumi_loss
         else:
             fine_loss = None
             mse_loss = None
@@ -233,7 +238,7 @@ class NeRFModel(LightningModule):
         if rgb_fine is not None:
             log_vals["train/fine_loss"] = fine_loss.item()
             log_vals["train/mse_loss"] = mse_loss.item()
-            log_vals["train/lumi_loss"] = lumi_loss.item()
+            #log_vals["train/lumi_loss"] = lumi_loss.item()
 
 
         output = {
@@ -257,7 +262,7 @@ class NeRFModel(LightningModule):
         all_rgb_coarse = []
         all_rgb_fine = []
         for i in range(0, ray_origins.shape[0], batchsize):
-            rgb_coarse, _, _, rgb_fine, _, _, _ = self.forward(
+            rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
                 (
                     ray_origins[i : i + batchsize],
                     ray_directions[i : i + batchsize],
@@ -457,7 +462,7 @@ if __name__ == "__main__":
     )
     trainer = Trainer(
         gpus=configargs.gpus,
-        # val_check_interval=cfg.experiment.validate_every,
+        val_check_interval=cfg.experiment.validate_every,
         default_root_dir="../logs",
         logger=logger,
         checkpoint_callback=checkpoint_callback,
@@ -466,7 +471,7 @@ if __name__ == "__main__":
         max_steps=cfg.experiment.train_iters,
         # log_gpu_memory=True,
         deterministic=True,
-        accumulate_grad_batches=2,
+        accumulate_grad_batches=4,
     )
     model = NeRFModel(cfg)
     trainer.fit(model)

@@ -110,6 +110,34 @@ class VolumeRenderer(torch.nn.Module):
         return rgb_map, disp_map, acc_map, weights, depth_map
 
 
+class DensityExtractor(torch.nn.Module):
+    def __init__(
+        self
+    ):
+        super(DensityExtractor, self).__init__()
+        one_e_10 = torch.tensor([1e10])
+        one_e_10.requires_grad = False
+        self.register_buffer("one_e_10", one_e_10)
+
+    def forward(self, radiance_field, depth_values, ray_directions):
+        # TESTED
+        dists = torch.cat(
+            (
+                depth_values[..., 1:] - depth_values[..., :-1],
+                self.one_e_10.expand(depth_values[..., :1].shape),
+            ),
+            dim=-1,
+        )
+        dists = dists * ray_directions[..., None, :].norm(p=2, dim=-1)
+
+        sigma_a = torch.nn.functional.relu(radiance_field[..., 3])
+        alpha = 1.0 - torch.exp(-sigma_a * dists)
+        weights = alpha * cumprod_exclusive(1.0 - alpha + 1e-10)
+
+
+        return weights
+
+
 class RaySampleInterval(torch.nn.Module):
     def __init__(self, point_amount=64, lindisp=True, perturb=False):
         super(RaySampleInterval, self).__init__()
