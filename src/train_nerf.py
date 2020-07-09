@@ -190,12 +190,12 @@ class NeRFModel(LightningModule):
             )
             # Expand rays to match batchsize
             expanded_ray_directions = ray_directions[..., None, :].expand_as(raypoints)
-            fine_radiance_field, specular = self.model_fine(raypoints, expanded_ray_directions)
+            fine_radiance_field = self.model_fine(raypoints, expanded_ray_directions)
 
             rgb_fine, disp_fine, acc_fine, _, _ = self.volume_renderer(
                 fine_radiance_field, fine_ray_intervals, ray_directions
             )
-            return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine, specular
+            return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
         return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
 
     def sample_points(self, points, rays=None, **kwargs):
@@ -210,7 +210,7 @@ class NeRFModel(LightningModule):
     def training_step(self, ray_batch, batch_idx):
         ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(ray_batch)
 
-        rgb_coarse, _, _, rgb_fine, _, _, lumi_fine = self.forward(
+        rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
             (ray_origins, ray_directions, bounds)
         )
 
@@ -218,9 +218,9 @@ class NeRFModel(LightningModule):
 
         if rgb_fine is not None:
             fine_loss = self.loss(rgb_fine[..., :3], ray_targets[..., :3])
-            lumi_loss = torch.mean(lumi_fine**2)
+            #lumi_loss = torch.mean(lumi_fine**2)
             mse_loss = coarse_loss + fine_loss
-            loss = mse_loss +  self.lumi_lambda * lumi_loss
+            loss = mse_loss #+  self.lumi_lambda * lumi_loss
             psnr = mse2psnr(fine_loss)
         else:
             fine_loss = None
@@ -238,7 +238,7 @@ class NeRFModel(LightningModule):
         if rgb_fine is not None:
             log_vals["train/fine_loss"] = fine_loss.item()
             log_vals["train/mse_loss"] = mse_loss.item()
-            log_vals["train/lumi_loss"] = lumi_loss.item()
+            #log_vals["train/lumi_loss"] = lumi_loss.item()
 
 
         output = {
@@ -262,7 +262,7 @@ class NeRFModel(LightningModule):
         all_rgb_coarse = []
         all_rgb_fine = []
         for i in range(0, ray_origins.shape[0], batchsize):
-            rgb_coarse, _, _, rgb_fine, _, _, lumi  = self.forward(
+            rgb_coarse, _, _, rgb_fine, _, _  = self.forward(
                 (
                     ray_origins[i : i + batchsize],
                     ray_directions[i : i + batchsize],
