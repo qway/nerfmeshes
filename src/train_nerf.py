@@ -11,6 +11,7 @@ from pathlib import Path
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.core.lightning import LightningModule
+from pytorch_lightning.core.memory import ModelSummary
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 from typing import Tuple
@@ -138,7 +139,7 @@ class NeRFModel(LightningModule):
         self.dataset_basepath = Path(cfg.dataset.basedir)
 
         self.loss = torch.nn.MSELoss()
-        #self.lumi_lambda = cfg.nerf.train.lumi_lambda
+        self.lumi_lambda = cfg.nerf.train.lumi_lambda
 
         self.model_coarse, self.model_fine = create_models(cfg)
         self.volume_renderer = VolumeRenderer(
@@ -189,12 +190,12 @@ class NeRFModel(LightningModule):
             )
             # Expand rays to match batchsize
             expanded_ray_directions = ray_directions[..., None, :].expand_as(raypoints)
-            fine_radiance_field = self.model_fine(raypoints, expanded_ray_directions)
+            fine_radiance_field, specular = self.model_fine(raypoints, expanded_ray_directions)
 
             rgb_fine, disp_fine, acc_fine, _, _ = self.volume_renderer(
                 fine_radiance_field, fine_ray_intervals, ray_directions
             )
-
+            return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine, specular
         return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
 
     def sample_points(self, points, rays=None, **kwargs):
@@ -209,7 +210,7 @@ class NeRFModel(LightningModule):
     def training_step(self, ray_batch, batch_idx):
         ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(ray_batch)
 
-        rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
+        rgb_coarse, _, _, rgb_fine, _, _, lumi_fine = self.forward(
             (ray_origins, ray_directions, bounds)
         )
 
@@ -217,17 +218,16 @@ class NeRFModel(LightningModule):
 
         if rgb_fine is not None:
             fine_loss = self.loss(rgb_fine[..., :3], ray_targets[..., :3])
-            #lumi_loss = torch.mean(torch.norm(lumi_fine, dim=1))
-            #mse_loss = coarse_loss + fine_loss
+            lumi_loss = torch.mean(lumi_fine**2)
             mse_loss = coarse_loss + fine_loss
-            loss = mse_loss #+  self.lumi_lambda * lumi_loss
+            loss = mse_loss +  self.lumi_lambda * lumi_loss
+            psnr = mse2psnr(fine_loss)
         else:
             fine_loss = None
             mse_loss = None
             lumi_loss = None
             loss = coarse_loss
-
-        psnr = mse2psnr(fine_loss)
+            psnr = mse2psnr(coarse_loss)
 
         log_vals = {
             "train/loss": loss.item(),
@@ -238,7 +238,7 @@ class NeRFModel(LightningModule):
         if rgb_fine is not None:
             log_vals["train/fine_loss"] = fine_loss.item()
             log_vals["train/mse_loss"] = mse_loss.item()
-            #log_vals["train/lumi_loss"] = lumi_loss.item()
+            log_vals["train/lumi_loss"] = lumi_loss.item()
 
 
         output = {
@@ -249,7 +249,7 @@ class NeRFModel(LightningModule):
         return output
 
     def validation_step(self, image_ray_batch, batch_idx):
-        ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(
+        ray_origins, ray_directions, bounds, ray_targets= get_ray_batch(
             image_ray_batch
         )
 
@@ -262,7 +262,7 @@ class NeRFModel(LightningModule):
         all_rgb_coarse = []
         all_rgb_fine = []
         for i in range(0, ray_origins.shape[0], batchsize):
-            rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
+            rgb_coarse, _, _, rgb_fine, _, _, lumi  = self.forward(
                 (
                     ray_origins[i : i + batchsize],
                     ray_directions[i : i + batchsize],
@@ -444,6 +444,8 @@ if __name__ == "__main__":
     # torch.autograd.set_detect_anomaly(True)
     seed_everything(cfg.experiment.randomseed)
 
+
+
     logdir = Path("../logs") / (cfg.experiment.id)
     os.makedirs(logdir, exist_ok=True)
     log_time = str(time.strftime("%y-%m-%d-%H:%M"))
@@ -451,7 +453,6 @@ if __name__ == "__main__":
     logdir = logdir / log_time
     #with open(os.path.join(logdir, "config.yml"), "w") as f:
     #   f.write(cfg.dump())  # cfg, f, default_flow_style=False)
-    logger.experiment.add_text("config", cfg.dump(), 0)
     checkpoint_callback = ModelCheckpoint(
         filepath=logdir,
         save_top_k=True,
@@ -460,6 +461,7 @@ if __name__ == "__main__":
         mode="min",
         prefix="",
     )
+    model = NeRFModel(cfg)
     trainer = Trainer(
         gpus=configargs.gpus,
         val_check_interval=cfg.experiment.validate_every,
@@ -473,5 +475,8 @@ if __name__ == "__main__":
         deterministic=True,
         accumulate_grad_batches=4,
     )
-    model = NeRFModel(cfg)
+
+    logger.experiment.add_text("config", cfg.dump(), 0)
+    logger.experiment.add_text("params", ModelSummary(model, trainer.weights_summary).__str__(), 0)
+
     trainer.fit(model)

@@ -1,3 +1,5 @@
+import math
+
 import torch
 
 ### TODO: Add model
@@ -283,6 +285,122 @@ class MultiSkipModule(torch.nn.Module):
         return value
 
 
+class SirenModule(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(SirenModule, self).__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+        init_bounds = math.sqrt(6 / in_features) * weight_multiplier
+        torch.nn.init.uniform_(self.linear.weight, a=-init_bounds, b=init_bounds)
+
+    def forward(self, x):
+        return torch.sin(self.linear(x))
+
+class SirenModuleNormal(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(SirenModuleNormal, self).__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+        torch.nn.init.normal_(self.linear.weight, mean=0, std=weight_multiplier)
+
+    def forward(self, x):
+        return torch.sin(self.linear(x))
+
+class SirenModuleExp(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(SirenModuleExp, self).__init__()
+        self.linear = torch.nn.Linear(in_features, out_features)
+        torch.nn.init.uniform_(self.linear.weight, a=-weight_multiplier, b=weight_multiplier)
+        self.linear.weight.data = 2**self.linear.weight.data
+
+    def forward(self, x):
+        return torch.sin(self.linear(x))
+
+
+class PotCoSirenModule(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(PotCoSirenModule, self).__init__()
+        self.linear = torch.nn.Linear(in_features, out_features//2)
+        torch.nn.init.uniform_(self.linear.weight, a=-weight_multiplier,
+                               b=weight_multiplier)
+        self.linear.weight.data = 2 ** self.linear.weight.data
+
+    def forward(self, x):
+        x = self.linear(x)
+        return torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+
+
+class CoSirenModule(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(CoSirenModule, self).__init__()
+        self.linear = torch.nn.Linear(in_features, out_features//2)
+        init_bounds = math.sqrt(24 / in_features) * weight_multiplier
+        torch.nn.init.uniform_(self.linear.weight, a=-init_bounds, b=init_bounds)
+
+    def forward(self, x):
+        x = self.linear(x)
+        return torch.cat([torch.sin(x), torch.cos(x)], dim=-1) - (math.pi/4)
+
+
+class GaussianNTK(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(GaussianNTK, self).__init__()
+        self.b = 2.**torch.linspace(0,max_posenc_log_scale,out_features//in_fea) - 1
+        self.osize = out_features
+        self.a = torch.nn.Parameter(torch.ones((out_features)))
+
+    def forward(self, x):
+        x = self.linear(x)
+        return torch.cat([self.a*torch.sin(x), self.a*torch.cos(x)], dim=-1)
+
+    def output_size(self):
+        return 2 * self.osize
+
+
+class Embbed2(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(Embbed2, self).__init__()
+        self.b = 2.**torch.linspace(0,weight_multiplier,out_features//in_features) - 1
+        self.b = torch.nn.Parameter(torch.reshape(torch.eye(in_features)*self.b[:,None,None], [out_features, in_features]))
+        self.osize = out_features
+        self.a = torch.nn.Parameter(torch.ones((out_features)))
+
+    def forward(self, x):
+        x = torch.matmul(x,self.b.T)
+        return torch.cat([self.a*torch.sin(x), self.a*torch.cos(x)], dim=-1)
+
+    def output_size(self):
+        return 2 * self.osize
+
+
+class SpatialEmbedding(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(SpatialEmbedding, self).__init__()
+        self.b = torch.zeros((in_features, out_features))
+        self.b.normal_(0, weight_multiplier)
+        self.b = torch.nn.Parameter(2.**self.b - 1)
+        self.osize = out_features
+        self.a = torch.nn.Parameter(torch.ones((out_features)))
+
+    def forward(self, x):
+        x = torch.matmul(x,self.b)
+        return torch.cat([self.a*torch.sin(x), self.a*torch.cos(x)], dim=-1)
+
+    def output_size(self):
+        return 2 * self.osize
+
+class SimpleSpatialEmbedding(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(SimpleSpatialEmbedding, self).__init__()
+        self.b = torch.zeros((in_features, out_features))
+        self.b.normal_(0, weight_multiplier)
+        self.b = torch.nn.Parameter(2.**self.b - 1)
+        self.osize = out_features
+
+    def forward(self, x):
+        x = torch.matmul(x,self.b)
+        return torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+
+    def output_size(self):
+        return 2 * self.osize
 
 class SimpleLuminance(torch.nn.Module):
     def __init__(self):
@@ -312,6 +430,14 @@ class FillUpLuminance(torch.nn.Module):
     def forward(self, color, luminance):
         return color + (1-color)*luminance
 
+class BoundedLuminance(torch.nn.Module):
+    def __init__(self):
+        super(BoundedLuminance, self).__init__()
+        self.register_buffer("one", torch.tensor([1.0]))
+
+    def forward(self, color, luminance):
+        return torch.min(color+luminance, self.one)
+
 def get_luminance_function(func):
     if func == "simple":
         return SimpleLuminance()
@@ -321,3 +447,16 @@ def get_luminance_function(func):
         return MultiplyLuminance()
     elif func == "fillup":
         return FillUpLuminance()
+    elif func == "min1":
+        return BoundedLuminance()
+
+
+class ResBlock(torch.nn.Module):
+    def __init__(self, hidden, hidden_mid=None):
+        super(ResBlock, self).__init__()
+        self.l0 = torch.nn.Sequential(
+                        SimpleModule(hidden, hidden_mid),
+                        SimpleModule(hidden_mid, hidden))
+
+    def forward(self, x):
+        return self.l0(x) + x

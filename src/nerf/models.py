@@ -87,23 +87,24 @@ class SimpleModel(torch.nn.Module):
         hidden_layers=4,
         hidden_layers_view=2,
         hidden_size=128,
-        num_encoding_fn_xyz=6,
+        num_encoding_fn_xyz=128,
         num_encoding_fn_dir=4,
         include_input_xyz=True,
         include_input_dir=True,
         log_sampling_xyz=True,
         log_sampling_dir=True,
+        skip_count=1,
+
+        **kwargs
     ):
         super(SimpleModel, self).__init__()
-        self.encode_xyz = PositionalEncoding(
-            num_encoding_fn_xyz, include_input_xyz, log_sampling_xyz
-        )
+        self.encode_xyz = SpatialEmbedding(3,num_encoding_fn_xyz,8)
         self.encode_dir = PositionalEncoding(
             num_encoding_fn_dir, include_input_dir, log_sampling_dir
         )
         self.layer0 = SimpleModule(self.encode_xyz.output_size(), hidden_size)
         self.hidden_all = MultiSkipModule(hidden_size, self.encode_xyz.output_size(),
-                                          hidden_layers)
+                                          hidden_layers, skip_count=skip_count)
         self.color = SimpleModule(hidden_size, 3, activation=torch.nn.Sigmoid())
         self.depth = torch.nn.Linear(hidden_size, 1)
 
@@ -111,121 +112,117 @@ class SimpleModel(torch.nn.Module):
         if hidden_layers_view >= 0:
             self.hidden_view = MultiSkipModule(hidden_size,
                                               self.encode_xyz.output_size()+self.encode_dir.output_size(),
-                                              hidden_layers)
+                                              hidden_layers_view)
 
     def forward(self, ray_points, ray_directions=None):
         xyz = self.encode_xyz(ray_points)
         x = self.layer0(xyz)
         x = self.hidden_all(x, xyz)
         depth = self.depth(x)
-        if self.hidden_layers_view_amount >= 0 and ray_directions:
+        if self.hidden_layers_view_amount >= 0 and ray_directions is not None:
             xyzdir = torch.cat((xyz, self.encode_dir(ray_directions)), dim=-1)
             x = self.hidden_view(x,xyzdir)
         color = self.color(x)
         return torch.cat([color,depth], dim=-1)
 
 
-class ViewLuminanceModel(torch.nn.Module):
+class SpecularSimpleModel(torch.nn.Module):
     def __init__(
         self,
         hidden_layers=4,
         hidden_layers_view=2,
         hidden_size=128,
-        num_encoding_fn_xyz=6,
+        num_encoding_fn_xyz=128,
         num_encoding_fn_dir=4,
         include_input_xyz=True,
         include_input_dir=True,
         log_sampling_xyz=True,
         log_sampling_dir=True,
-        luminance_function="simple",
+        skip_count=1,
+        luminance_function="min1",
+        **kwargs
     ):
-        super(ViewLuminanceModel, self).__init__()
-        self.encode_xyz = PositionalEncoding(
-            num_encoding_fn_xyz, include_input_xyz, log_sampling_xyz
-        )
-        self.encode_dir = PositionalEncoding(
-            num_encoding_fn_dir, include_input_dir, log_sampling_dir
-        )
-        self.hidden_layers = torch.nn.Sequential(
-            SkipModule(self.encode_xyz.output_size(), hidden_size),
-            *[SimpleModule(hidden_size, hidden_size) for _ in range(hidden_layers)]
-        )
-
-        self.out = torch.nn.Linear(hidden_size, 4)
-        self.luminance_out = torch.nn.Sequential(
-            SimpleModule(hidden_size + self.encode_dir.output_size() + self.encode_xyz.output_size(), hidden_size),
-            *[
-                SimpleModule(hidden_size, hidden_size)
-                for _ in range(hidden_layers_view - 1)
-            ],
-            torch.nn.Linear(hidden_size, 1),
-        )
-        self.luminance_function = get_luminance_function(luminance_function)
-
-
-    def forward(self, ray_points, ray_directions=None, only_luminance=False):
-        xyz = self.encode_xyz(ray_points)
-        x = self.hidden_layers(xyz)
-        if ray_directions is not None:
-            luminance = self.encode_dir(ray_directions)
-            luminance = torch.cat((x, luminance, xyz), dim=-1)
-            luminance = self.luminance_out(luminance)
-            x = self.out(x)
-            if only_luminance:
-                color = luminance.expand(x[..., :3].shape)
-            else:
-                color = self.luminance_function(x[..., :3], luminance)
-            return torch.cat((color, x[..., 2:3]), dim=-1), luminance
-        else:
-            return self.out(x)
-
-
-class ViewLuminanceModelSkip(torch.nn.Module):
-    def __init__(
-        self,
-        hidden_layers=4,
-        hidden_layers_view=2,
-        hidden_size=128,
-        num_encoding_fn_xyz=6,
-        num_encoding_fn_dir=4,
-        include_input_xyz=True,
-        include_input_dir=True,
-        log_sampling_xyz=True,
-        log_sampling_dir=True,
-        luminance_function="simple",
-    ):
-        super(ViewLuminanceModelSkip, self).__init__()
-        self.encode_xyz = PositionalEncoding(
-            num_encoding_fn_xyz, include_input_xyz, log_sampling_xyz
-        )
+        super(SpecularSimpleModel, self).__init__()
+        self.encode_xyz = SpatialEmbedding(3,num_encoding_fn_xyz,8)
         self.encode_dir = PositionalEncoding(
             num_encoding_fn_dir, include_input_dir, log_sampling_dir
         )
         self.layer0 = SimpleModule(self.encode_xyz.output_size(), hidden_size)
-        self.hidden_all = MultiSkipModule(hidden_size, self.encode_xyz.output_size(), hidden_layers)
+        self.hidden_all = MultiSkipModule(hidden_size, self.encode_xyz.output_size(),
+                                          hidden_layers, skip_count=skip_count)
         self.color = SimpleModule(hidden_size, 3, activation=torch.nn.Sigmoid())
         self.depth = torch.nn.Linear(hidden_size, 1)
 
-        self.lumi_hidden = MultiSkipModule(hidden_size, self.encode_xyz.output_size() + self.encode_dir.output_size(), hidden_layers_view)
-        self.luminance_out = SimpleModule(hidden_size, 1, activation=torch.nn.Sigmoid())
-        self.luminance_function = get_luminance_function(luminance_function)
+        self.hidden_layers_view_amount = hidden_layers_view
+        if hidden_layers_view >= 0:
+            self.hidden_view = MultiSkipModule(hidden_size,
+                                              self.encode_xyz.output_size()+self.encode_dir.output_size(),
+                                              hidden_layers_view)
+            self.specular = SimpleModule(hidden_size, 1, activation=torch.nn.Tanh())
+            self.combine = get_luminance_function(luminance_function)
 
-
-    def forward(self, ray_points, ray_directions=None, only_luminance=False):
+    def forward(self, ray_points, ray_directions=None):
         xyz = self.encode_xyz(ray_points)
         x = self.layer0(xyz)
         x = self.hidden_all(x, xyz)
+        depth = self.depth(x)
+        color = self.color(x)
+        if self.hidden_layers_view_amount >= 0 and ray_directions is not None:
+            xyzdir = torch.cat((xyz, self.encode_dir(ray_directions)), dim=-1)
+            x = self.hidden_view(x,xyzdir)
+            specular = torch.nn.functional.relu(self.specular(x))
+            color = self.combine(color, specular)
+        return torch.cat([color,depth], dim=-1), specular
 
-        if ray_directions is not None:
-            xyzdir = torch.cat([xyz, self.encode_dir(ray_directions)],dim=-1)
-            luminance = self.lumi_hidden(x, xyzdir)
-            luminance = self.luminance_out(luminance)
-            color = self.color(x)
-            depth = self.depth(x)
-            if only_luminance:
-                color = luminance.expand(color.shape)
-            else:
-                color = self.luminance_function(color, luminance)
-            return torch.cat((color, depth), dim=-1), luminance
-        else:
-            return torch.cat((self.color(x), self.depth(x)), dim=-1)
+
+class FlatModel(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_size=256,
+        **kwargs
+    ):
+        super(FlatModel, self).__init__()
+        self.embed = SimpleSpatialEmbedding(3, hidden_size, 10)
+        self.model0 = SimpleModule(2*hidden_size, 2*hidden_size)
+        self.model1 = SimpleModule(4*hidden_size, hidden_size)
+
+        self.depth = SimpleModule(hidden_size, 1)
+        self.color = SimpleModule(hidden_size, 3, activation=torch.nn.Sigmoid())
+
+
+    def forward(self, ray_points, ray_directions=None):
+        x = self.embed(ray_points)
+        x_hat = self.model0(x)
+        x = self.model1(torch.cat([x,x_hat], dim=-1))
+        depth = self.depth(x)
+        color = self.color(x)
+        return torch.cat([color,depth], dim=-1)
+
+
+class ResModel(torch.nn.Module):
+    def __init__(
+        self,
+        hidden_size=128,
+        hidden_layers=2,
+        num_encoding_fn_xyz=128,
+        **kwargs
+    ):
+        super(ResModel, self).__init__()
+        self.embed = SimpleSpatialEmbedding(3, num_encoding_fn_xyz, 8)
+        self.model0 = SimpleModule(self.embed.output_size(), hidden_size)
+        self.model1 = torch.nn.Sequential(
+            *[ResBlock(hidden_size, hidden_size//2) for _ in range(hidden_layers)]
+        )
+
+        self.depth = SimpleModule(hidden_size, 1)
+        self.color = SimpleModule(hidden_size, 3, activation=torch.nn.Sigmoid())
+
+
+    def forward(self, ray_points, ray_directions=None):
+        x = self.embed(ray_points)
+        x_hat = self.model0(x)
+        x = self.model1(x_hat)
+        depth = self.depth(x)
+        color = self.color(x)
+        return torch.cat([color,depth], dim=-1)
+

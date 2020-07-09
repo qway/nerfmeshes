@@ -68,7 +68,7 @@ models:
     log_sampling_dir: True
   # Fine model.
   # Name of the torch.nn.Module class that implements the model.
-  fine_type: SimpleModel
+  fine_type: SimpleSiren
   fine:
     # Number of layers in the model.
     hidden_layers: 5

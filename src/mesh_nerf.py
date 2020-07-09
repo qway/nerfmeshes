@@ -242,7 +242,7 @@ def main():
             #result_batch = model.sample_points(pos_batch, None)
 
             # Current color hack since the network does not normalize colors
-            result_batch = result_batch[..., :3] * 255
+            result_batch = torch.nn.functional.sigmoid(result_batch[..., :3]) * 255
             # Query the whole diffuse map
             diffuse[offset1:offset2] = result_batch[..., :3].cpu().detach().numpy()
     if not specific_view:
