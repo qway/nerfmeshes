@@ -198,25 +198,22 @@ def main():
                 rgb_fine[..., :3], img_target[..., :3]
             )
 
-        torch.save({
-            "z_vals": z_vals,
-            "weights": weights,
-            "depth_coarse": depth_coarse,
-            "depth_fine": depth_fine,
-            "dep_target": dep_target
-        }, "../../data/output/eval_sample_depth_weights_from_volume_render_fn.pt")
-
-        # print(z_vals[400][400][:64])
-        # print(z_vals[400][400][64:])
-        # print(weights[400][400][:64])
-        # print(weights[400][400][64:128])
-        # print(weights[400][400][128:])
-        # print(depth_coarse[400][400])
-        # print(depth_fine[400][400])
-        # print(dep_target[400][400])
-        exit(-1)
         coarse_depth_loss = torch.nn.functional.mse_loss(depth_coarse, dep_target)
         fine_depth_loss = torch.nn.functional.mse_loss(depth_fine, dep_target)
+
+        torch.save({
+            # "z_vals": z_vals[400, 400, :],
+            # "weights": weights[400, 400, :],
+            # "depth_coarse": depth_coarse[400, 400],
+            "depth_fine": depth_fine,
+            # "dep_target": dep_target[400, 400],
+            # "z_vals_empty": z_vals[0, 0].contiguous().detach().cpu(),
+            # "weights_empty": weights[0, 0].contiguous().detach().cpu()
+            # "depth_coarse_empty": depth_coarse[0, 0].contiguous().detach().cpu(),
+            # "depth_fine_empty": depth_fine[0, 0].contiguous().detach().cpu(),
+            # "dep_target_empty": dep_target[0, 0].contiguous().detach().cpu()
+        }, "../../data/output/eval_sample_depth_high_res.pt")
+        print("Model saved")
 
         print(f"Loss MSE image {i}: Coarse Loss: {coarse_loss} / Fine Loss: {fine_loss}")
         print(f"Loss PSNR image {i}: Coarse PSNR: {mse2psnr(coarse_loss.item())} / Fine PSNR: {mse2psnr(fine_loss.item())}")
@@ -234,6 +231,8 @@ def main():
                 imageio.imwrite(savefile, cast_to_disparity_image(disp))
 
         tqdm.write(f"Avg time per image: {sum(times_per_image) / (i + 1)}")
+
+        exit(-1)
 
 
 if __name__ == "__main__":

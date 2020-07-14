@@ -47,7 +47,7 @@ models:
     num_layers: 8
     # Number of hidden units in each layer of the MLP (multi-layer
     # perceptron).
-    hidden_size: 128
+    hidden_size: 256
     # Add a skip connection once in a while. Note: This parameter
     # won't take affect unless num_layers > skip_connect_every.
     skip_connect_every: 3
@@ -78,7 +78,7 @@ models:
     num_layers: 8
     # Number of hidden units in each layer of the MLP (multi-layer
     # perceptron).
-    hidden_size: 128
+    hidden_size: 256
     # Add a skip connection once in a while. Note: This parameter
     # won't take affect unless num_layers > skip_connect_every.
     skip_connect_every: 3

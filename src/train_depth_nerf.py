@@ -12,10 +12,16 @@ from tqdm import tqdm, trange
 
 from nerf import (CfgNode, get_embedding_function, get_ray_bundle, img2mse,
                   load_blender_data, load_llff_data, meshgrid_xy, models,
-                  mse2psnr, run_one_iter_of_nerf)
+                  mse2psnr)
+
+# from nerf import (run_one_iter_of_nerf)
+
+from nerf.var import (run_one_iter_of_nerf)
 
 
 def main():
+    torch.set_printoptions(threshold = 100, edgeitems = 50)
+
     parser = argparse.ArgumentParser()
 
     parser.add_argument(
@@ -51,7 +57,7 @@ def main():
         # Load dataset
         images, poses, depth_data, render_poses, (H, W, focal), i_split = load_blender_data(
             cfg.dataset.basedir,
-            categories=["test", "val"],
+            categories=["test_high_res", "val"],
         )
         i_train, i_val = i_split
 
@@ -121,13 +127,11 @@ def main():
             log_dir = root_path + f"_unnamed_{counter}"
             counter += 1
 
-        # Rename the main folder
-        os.rename(root_path, log_dir)
-        os.makedirs(root_path)
-
-        log_dir = root_path
+        # Create main folder
+        os.makedirs(log_dir)
 
     # Create a writer
+    print(f"Writing to {log_dir}")
     writer = SummaryWriter(log_dir)
 
     # Write out config parameters.
@@ -148,9 +152,6 @@ def main():
 
     # TODO: Prepare raybatch tensor if batching random rays
     for i in trange(start_iter, cfg.experiment.train_iters):
-
-        # if i >= 15200:
-        #     exit(-1)
 
         model_coarse.train()
         if model_fine:
@@ -192,6 +193,7 @@ def main():
                 mode="train",
                 encode_position_fn=encode_position_fn,
                 encode_direction_fn=encode_direction_fn,
+                it = i,
             )
         else:
             # using the test set instead of train
@@ -235,17 +237,17 @@ def main():
                 encode_position_fn=encode_position_fn,
                 encode_direction_fn=encode_direction_fn,
                 depth_data = depth_data_s,
+                it = i,
             )
 
             target_ray_values = target_s
 
         # rgb loss
-        # coarse_loss = torch.nn.functional.mse_loss(
-        #     rgb_coarse[..., :3], target_ray_values[..., :3]
-        # )
-        coarse_loss = torch.tensor(0)
+        coarse_loss = torch.nn.functional.mse_loss(
+            rgb_coarse[..., :3], target_ray_values[..., :3]
+        )
 
-        fine_loss = None
+        fine_loss = torch.tensor(0)
         if rgb_fine is not None:
             fine_loss = torch.nn.functional.mse_loss(
                 rgb_fine[..., :3], target_ray_values[..., :3]
@@ -254,20 +256,36 @@ def main():
         # depth loss
         coarse_depth_loss, fine_depth_loss = torch.tensor(0), torch.tensor(0)
         if depth_data is not None:
-            # coarse_depth_loss = torch.nn.functional.mse_loss(
-            #     depth_coarse, depth_data_s
-            # )
+            coarse_depth_loss = torch.nn.functional.mse_loss(
+                depth_coarse, depth_data_s
+            )
+
+            # coarse_depth_small_loss = torch.nn.functional.mse_loss(
+            #     depth_coarse[~mask], depth_data_s[~mask]
+            # )* 1e-1
 
             if depth_fine is not None:
                 fine_depth_loss = torch.nn.functional.mse_loss(
                     depth_fine, depth_data_s
                 )
+                # fine_depth_loss = torch.abs(depth_fine - depth_data_s).mean()
+                # fine_depth_small_loss = torch.nn.functional.mse_loss(
+                #     depth_fine[~mask], depth_data_s[~mask]
+                # ) * 1e-1
 
-        loss = (fine_loss if fine_loss is not None else 0.0)
+        # loss = coarse_loss + coarse_depth_loss * 1e-2
+        loss = coarse_loss + fine_loss + (coarse_depth_loss + fine_depth_loss) * 1e-2
         psnr = mse2psnr(fine_loss.item())
 
         # if depth_data is not None and fine_depth_loss is not None:
-        #     loss += fine_depth_loss * 0.001
+        #     if i >= 5000:
+        #         print(depth_coarse)
+        #         print(depth_fine)
+        #         print(depth_data_s)
+        #         exit(-1)
+        #
+        #     loss_depth = fine_depth_loss + coarse_depth_loss + coarse_depth_small_loss + fine_depth_small_loss
+        #     loss += loss_depth * 1e-1 / 4
 
         loss.backward()
         optimizer.step()
@@ -281,13 +299,30 @@ def main():
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr_new
 
+        # if i > 2000:
+        #     torch.save({
+        #         'depth_coarse': depth_coarse.detach().cpu(),
+        #         'depth_data_s': depth_data_s.detach().cpu(),
+        #         'z_samples': z_samples.detach().cpu(),
+        #         'weights': weights.detach().cpu(),
+        #         'radiance': radi.detach().cpu(),
+        #     }, "../../data/output/train_sampling_volume_render_one_loss.pt")
+        #
+        #     exit(-1)
+
         if i % cfg.experiment.print_every == 0 or i == cfg.experiment.train_iters - 1:
             tqdm.write(
                 "[TRAIN] Iter: "
                 + str(i)
                 + " Loss: "
                 + str(loss.item())
-                + " Loss Depth: "
+                + " Coarse: "
+                + str(coarse_loss.item())
+                + " Fine: "
+                + str(fine_loss.item())
+                + " Coarse Depth: "
+                + str(coarse_depth_loss.item())
+                + " Fine Depth: "
                 + str(fine_depth_loss.item())
                 + " PSNR: "
                 + str(psnr)
@@ -306,8 +341,7 @@ def main():
         writer.add_scalar("train/psnr", psnr, i)
 
         # Validation
-        with_validation = False
-        if with_validation and i % cfg.experiment.validate_every == 0 or i == cfg.experiment.train_iters - 1:
+        if i >= 50000:
             tqdm.write("  [VAL] =======> Iter: " + str(i))
             model_coarse.eval()
             if model_fine:
@@ -364,9 +398,9 @@ def main():
                     loss = fine_loss
                 else:
                     loss = coarse_loss
-                loss = coarse_loss + fine_loss
-                psnr = mse2psnr(loss.item())
-                writer.add_scalar("validation/loss", loss.item(), i)
+                loss = coarse_loss
+                psnr = mse2psnr(coarse_loss.item())
+                writer.add_scalar("validation/loss", coarse_loss.item(), i)
                 writer.add_scalar("validation/coarse_loss", coarse_loss.item(), i)
                 writer.add_scalar("validation/psnr", psnr, i)
                 writer.add_image(
@@ -377,11 +411,13 @@ def main():
                         "validation/rgb_fine", cast_to_image(rgb_fine[..., :3]), i
                     )
                     writer.add_scalar("validation/fine_loss", fine_loss.item(), i)
+
                 writer.add_image(
                     "validation/img_target",
                     cast_to_image(target_ray_values[..., :3]),
                     i,
                 )
+
                 tqdm.write(
                     "  Validation loss: "
                     + str(loss.item())
@@ -391,7 +427,6 @@ def main():
                     + str(time.time() - start)
                 )
 
-        if i % cfg.experiment.save_every == 0 or i == cfg.experiment.train_iters - 1:
             checkpoint_dict = {
                 "iter": i,
                 "model_coarse_state_dict": model_coarse.state_dict(),
@@ -407,6 +442,8 @@ def main():
                 os.path.join(log_dir, "checkpoint" + str(i).zfill(5) + ".ckpt"),
             )
             tqdm.write("================== Saved Checkpoint =================")
+
+            exit(-1)
 
     print("Done!")
 

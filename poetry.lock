@@ -255,6 +255,14 @@ numpy = ">=1.11.1"
 
 [[package]]
 category = "main"
+description = "Python bindings for ILM's OpenEXR image file format"
+name = "openexr"
+optional = false
+python-versions = "*"
+version = "1.3.2"
+
+[[package]]
+category = "main"
 description = "Python Imaging Library (Fork)"
 name = "pillow"
 optional = false
@@ -625,7 +633,7 @@ docs = ["sphinx", "jaraco.packaging (>=3.2)", "rst.linker (>=1.9)"]
 testing = ["jaraco.itertools", "func-timeout"]
 
 [metadata]
-content-hash = "557540e621bea76ffa8489947cfc9538cb0c781007faedf02149c7d201dcc480"
+content-hash = "3ce78234097b36b11fde81738c2d05e0e226024232991f825760bc4cc58e5dee"
 python-versions = "^3.7"
 
 [metadata.files]
@@ -828,6 +836,9 @@ opencv-python-headless = [
     {file = "opencv_python_headless-4.2.0.34-cp38-cp38-manylinux1_x86_64.whl", hash = "sha256:ca9a5f4b04f2b423892ef5934fdd685edd0bc458c77fc7e164156a50e6be0377"},
     {file = "opencv_python_headless-4.2.0.34-cp38-cp38-win32.whl", hash = "sha256:06a96ec4866aa40c68c255042ea0ab8a96c07f2eb54f5b0dc6b8ac08b00c1b7e"},
     {file = "opencv_python_headless-4.2.0.34-cp38-cp38-win_amd64.whl", hash = "sha256:20c450943acebd9aa04566fdef4a658b94eec80a0c39a8f480c9aa1696034fcb"},
+]
+openexr = [
+    {file = "OpenEXR-1.3.2.tar.gz", hash = "sha256:1ef52d60a2c2cd0ebf8d8a7baf7fffd2a475953035dd9afab2117b86526f339f"},
 ]
 pillow = [
     {file = "Pillow-7.1.2-cp35-cp35m-macosx_10_10_intel.whl", hash = "sha256:ae2b270f9a0b8822b98655cb3a59cdb1bd54a34807c6c56b76dd2e786c3b7db3"},

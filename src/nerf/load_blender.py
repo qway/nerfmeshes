@@ -1,6 +1,6 @@
 import json
 import os
-
+import OpenEXR as exr, Imath
 import cv2
 import imageio
 import numpy as np
@@ -37,8 +37,33 @@ def pose_spherical(theta, phi, radius):
     return c2w
 
 
-def load_blender_data(basedir, categories = None, half_res=False, testskip=1, debug=False):
-    splits = ["train", "val", "test"] if categories is None else categories
+def read_depth_from_exr(filename):
+    file = exr.InputFile(filename)
+    header = file.header()
+
+    dw = header['dataWindow']
+    size = (dw.max.y - dw.min.y + 1, dw.max.x - dw.min.x + 1)
+
+    # convert all channels in the image to numpy arrays
+    channelData = dict()
+    for channel in header['channels']:
+        data = file.channel(channel, Imath.PixelType(Imath.PixelType.FLOAT))
+        data = np.fromstring(data, dtype = np.float32)
+        data = np.reshape(data, size)
+
+        channelData[channel] = data
+
+    if 'Z' in header['channels']:
+        return channelData['Z']
+
+    channels = ['R', 'G', 'B', 'A'] if 'A' in header['channels'] else ['R', 'G', 'B']
+    img = np.concatenate([channelData[channel][..., np.newaxis] for channel in channels], axis = 2)
+
+    return img
+
+
+def load_blender_data(basedir, categories = None, half_res = False, testskip = 1, debug = False):
+    splits = [ "train", "val", "test" ] if categories is None else categories
 
     # Load meta data files
     metas = {}
@@ -50,7 +75,6 @@ def load_blender_data(basedir, categories = None, half_res=False, testskip=1, de
     depth_imgs = []
     poses = []
     counts = [0]
-    threshold = 31.7367
 
     for meta_name_type in splits:
         meta = metas[meta_name_type]
@@ -68,12 +92,11 @@ def load_blender_data(basedir, categories = None, half_res=False, testskip=1, de
             f_name = os.path.join(basedir, frame["file_path"] + ".png")
             curr_imgs.append(imageio.imread(f_name))
 
-            if meta_name_type == "test":
-                f_depth_name = os.path.join(basedir, frame["file_path"] + "_depth_0001.png")
-
-                depth_curr = 255 - imageio.imread(f_depth_name)[:, :, 0]
-                depth_curr[depth_curr == 255] = 0
-                depth_curr = depth_curr.astype(np.float32) / threshold
+            if meta_name_type == "test_high_res":
+                f_depth_name = os.path.join(basedir, frame["file_path"] + "_depth_0001.exr")
+                depth_curr = read_depth_from_exr(f_depth_name)
+                depth_curr[depth_curr == depth_curr.max(initial = 0)] = 0
+                depth_curr = depth_curr[..., 0]
             else:
                 depth_curr = np.zeros((800, 800))
 

@@ -14,7 +14,6 @@ def volume_render_radiance_field(
     one_e_10 = torch.tensor(
         [1e10], dtype=ray_directions.dtype, device=ray_directions.device
     )
-
     dists = torch.cat(
         (
             depth_values[..., 1:] - depth_values[..., :-1],
@@ -35,14 +34,16 @@ def volume_render_radiance_field(
             )
             * radiance_field_noise_std
         )
-
+        # noise = noise.to(radiance_field)
     sigma_a = torch.nn.functional.relu(radiance_field[..., 3] + noise)
     alpha = 1.0 - torch.exp(-sigma_a * dists)
     weights = alpha * cumprod_exclusive(1.0 - alpha + 1e-10)
 
     rgb_map = weights[..., None] * rgb
     rgb_map = rgb_map.sum(dim=-2)
-    depth_map = (weights * depth_values).sum(dim=-1)
+    depth_map = weights * depth_values
+    depth_map = depth_map.sum(dim=-1)
+    # depth_map = (weights * depth_values).sum(dim=-1)
     acc_map = weights.sum(dim=-1)
     disp_map = 1.0 / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / acc_map)
 

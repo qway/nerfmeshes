@@ -128,12 +128,11 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-
 #Custom
 models/*
 data/*
 .idea
 **/cache/
-**/*logs/
+**/*logs*/
 .venv/
 

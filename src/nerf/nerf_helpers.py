@@ -54,10 +54,13 @@ def cumprod_exclusive(tensor: torch.Tensor) -> torch.Tensor:
     # TESTED
     # Only works for the last dimension (dim=-1)
     dim = -1
+
     # Compute regular cumprod first (this is equivalent to `tf.math.cumprod(..., exclusive=False)`).
     cumprod = torch.cumprod(tensor, dim)
+
     # "Roll" the elements along dimension 'dim' by 1 element.
     cumprod = torch.roll(cumprod, 1, dim)
+
     # Replace the first element by "1" as this is what tf.cumprod(..., exclusive=True) does.
     cumprod[..., 0] = 1.0
 
@@ -107,13 +110,12 @@ def get_ray_bundle(
         dim=-1,
     )
 
-    # if depth_map is not None:
-    #     # find 3D correspondences
-    #     correspondences = (-1) * directions * depth_map[..., None]
+    # Normalized rays, spherical / pinhole camera
+    directions_norm = directions / directions.norm(2, dim = -1)[..., None]
 
     # (W, H, 1, 3) * (3, 3) => (W, H, 3, 3) => (W, H, 3)
     ray_directions = torch.sum(
-        directions[..., None, :] * tform_cam2world[:3, :3], dim=-1
+        directions_norm[..., None, :] * tform_cam2world[:3, :3], dim=-1
     )
 
     ray_origins = tform_cam2world[:3, -1].expand(ray_directions.shape)

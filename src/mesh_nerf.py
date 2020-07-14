@@ -1,16 +1,10 @@
 import argparse
-import os
-import time
-
-import imageio
 import numpy as np
 import torch
 import torchvision
 import yaml
 
-from nerf.volume_rendering_utils import volume_render_radiance_field
 from nerf.train_utils import predict_and_render_radiance
-from nerf import run_network
 from skimage import measure
 from scipy.spatial import KDTree
 from tqdm import tqdm
@@ -48,6 +42,7 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
     """
     Exports a mesh in the (.obj) format.
     """
+    print('Writing to obj')
 
     with open(filename, 'w') as fh:
 
@@ -84,16 +79,23 @@ def main():
     parser.add_argument(
         "--save-dir", type = str, help = "Save mesh to this directory, if specified."
     )
+    
+    parser.add_argument(
+        "--iso-level",
+        type = float,
+        help = "Iso-Level to be queried",
+        default = 32
+    )
 
     parser.add_argument('--cache-mesh', dest = 'cache_mesh', action = 'store_true')
     parser.add_argument('--no-cache-mesh', dest = 'cache_mesh', action = 'store_false')
     parser.set_defaults(cache_mesh = True)
 
-    configargs = parser.parse_args()
+    config_args = parser.parse_args()
 
     # Read config file.
     cfg = None
-    with open(configargs.config, "r") as f:
+    with open(config_args.config, "r") as f:
         cfg_dict = yaml.load(f, Loader = yaml.FullLoader)
         cfg = CfgNode(cfg_dict)
 
@@ -101,8 +103,8 @@ def main():
     i_train, i_val, i_test = None, None, None
     if cfg.dataset.type.lower() == "blender":
         # Load blender dataset
-        images, poses, render_poses, hwf, i_split = load_blender_data(
-            configargs.base_dir if configargs.base_dir is not None else cfg.dataset.basedir,
+        images, poses, _, render_poses, hwf, i_split = load_blender_data(
+            config_args.base_dir if config_args.base_dir is not None else cfg.dataset.basedir,
             half_res = cfg.dataset.half_res,
             testskip = cfg.dataset.testskip,
         )
@@ -112,7 +114,7 @@ def main():
     elif cfg.dataset.type.lower() == "llff":
         # Load LLFF dataset
         images, poses, bds, render_poses, i_test = load_llff_data(
-            configargs.base_dir if configargs.base_dir is not None else cfg.dataset.basedir, factor = cfg.dataset.downsample_factor,
+            config_args.base_dir if config_args.base_dir is not None else cfg.dataset.basedir, factor = cfg.dataset.downsample_factor,
         )
         hwf = poses[0, :3, -1]
         H, W, focal = hwf
@@ -160,7 +162,7 @@ def main():
         )
         model_fine.to(device)
 
-    checkpoint = torch.load(configargs.checkpoint)
+    checkpoint = torch.load(config_args.checkpoint)
     model_coarse.load_state_dict(checkpoint["model_coarse_state_dict"])
     if checkpoint["model_fine_state_dict"]:
         try:
@@ -182,8 +184,8 @@ def main():
         model_fine.eval()
 
     # Mesh Extraction
-    N = 128
-    iso_value = 32
+    N = 256
+    iso_value = config_args.iso_level
     batch_size = 1024
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
@@ -198,10 +200,10 @@ def main():
     specific_view = False
     adjust_normals = False
     plane_near = 0
-    plane_far = 6
+    plane_far = 4
 
     vertices, triangles, normals, diffuse = None, None, None, None
-    if configargs.cache_mesh:
+    if config_args.cache_mesh:
         query_pts = np.stack(np.meshgrid(t, t, t), -1).astype(np.float32)
         pts = torch.from_numpy(query_pts)
         dimension = pts.shape[-1]
@@ -218,6 +220,7 @@ def main():
                 embedded_dirs = encode_direction_fn(batch)
                 embedded = torch.cat((embedded, embedded_dirs), dim = -1)
 
+            # result_batch = model_fine(embedded)
             result_batch = model_fine(embedded)
 
             # Extracting the density
@@ -225,6 +228,9 @@ def main():
 
         # Create a 3D density grid
         grid_alpha = density.reshape((N, N, N))
+        print(f"Max density: {grid_alpha.max()}, Min density {grid_alpha.min()}, Mean density {grid_alpha.mean()}")
+        print(f"Querying based on iso level: {iso_value}")
+        # iso_value = grid_alpha.min() * 0.6 + grid_alpha.max() * 0.4
 
         # Extracting iso-surface triangulated
         vertices, triangles, normals, values = measure.marching_cubes(grid_alpha, iso_value)
@@ -247,6 +253,7 @@ def main():
                     embedded_dirs = encode_direction_fn(batch)
                     embedded = torch.cat((embedded, embedded_dirs), dim = -1)
 
+                # result_batch = model_fine(embedded)
                 result_batch = model_fine(embedded)
 
                 # Query the whole diffuse map
@@ -323,7 +330,7 @@ def main():
     ray_origins = targets + view_disparity * directions
 
     # Ray directions
-    ray_directions_loose = targets  - ray_origins
+    ray_directions_loose = targets - ray_origins
     ray_directions = ray_directions_loose / ray_directions_loose.norm(dim = 1).unsqueeze(1)
 
     near = plane_near * torch.ones_like(ray_directions[..., :1])
@@ -339,23 +346,23 @@ def main():
     ray_batches = get_minibatches(rays, chunksize = 2048)
 
     pred = []
-    for ray_batch in ray_batches:
+    for ray_batch in tqdm(ray_batches):
         # move to appropriate device
         ray_batch = ray_batch.to(device)
 
-        _, _, _, diffuse, _, _ = predict_and_render_radiance(ray_batch, model_coarse, model_fine, cfg,
+        diffuse_coarse, _, _, _, diffuse_fine, _, _, _ = predict_and_render_radiance(ray_batch, model_coarse, model_fine, cfg,
                 mode = "validation",
                 encode_position_fn = encode_position_fn,
                 encode_direction_fn = encode_direction_fn,
         )
 
-        pred.append(diffuse.cpu().detach())
+        pred.append(diffuse_fine.cpu().detach())
 
     # Query the whole diffuse map
-    diffuse = torch.cat(pred, dim = 0).numpy()
+    diffuse_fine = torch.cat(pred, dim = 0).numpy()
 
     # Export model
-    export_obj(vertices, triangles, diffuse, normals, "lego.obj")
+    export_obj(vertices, triangles, diffuse_fine, normals, "lego.obj")
 
 
 if __name__ == "__main__":
