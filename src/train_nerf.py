@@ -139,7 +139,7 @@ class NeRFModel(LightningModule):
         self.dataset_basepath = Path(cfg.dataset.basedir)
 
         self.loss = torch.nn.MSELoss()
-        self.lumi_lambda = cfg.nerf.train.lumi_lambda
+        #self.lumi_lambda = cfg.nerf.train.lumi_lambda
 
         self.model_coarse, self.model_fine = create_models(cfg)
         self.volume_renderer = VolumeRenderer(
@@ -224,7 +224,7 @@ class NeRFModel(LightningModule):
             psnr = mse2psnr(fine_loss)
         else:
             fine_loss = None
-            mse_loss = None
+            mse_loss = coarse_loss
             lumi_loss = None
             loss = coarse_loss
             psnr = mse2psnr(coarse_loss)
@@ -243,7 +243,7 @@ class NeRFModel(LightningModule):
 
         output = {
             "loss": loss,
-            "progress_bar": {"training_loss": loss},
+            "progress_bar": {"training_loss": loss.item()},
             "log": log_vals,
         }
         return output
@@ -435,6 +435,12 @@ if __name__ == "__main__":
         default="",
         help="Path to load saved checkpoint from.",
     )
+    parser.add_argument(
+        "--runname",
+        type=str,
+        default=None,
+        help="Name of the run should be appended to the date"
+    )
     configargs = parser.parse_args()
 
     # Read config file.
@@ -445,23 +451,25 @@ if __name__ == "__main__":
     seed_everything(cfg.experiment.randomseed)
 
 
+    model = NeRFModel(cfg)
 
     logdir = Path("../logs") / (cfg.experiment.id)
     os.makedirs(logdir, exist_ok=True)
-    log_time = str(time.strftime("%y-%m-%d-%H:%M"))
-    logger = TensorBoardLogger(logdir, "", log_time)
-    logdir = logdir / log_time
+    runname = str(time.strftime("%y-%m-%d-%H:%M"))
+    if configargs.runname:
+        runname += "-"+configargs.runname
+    logger = TensorBoardLogger(logdir, "", runname)
+    logdir = logdir / runname
     #with open(os.path.join(logdir, "config.yml"), "w") as f:
     #   f.write(cfg.dump())  # cfg, f, default_flow_style=False)
     checkpoint_callback = ModelCheckpoint(
-        filepath=logdir,
+        filepath=str(logdir),
         save_top_k=True,
         verbose=True,
         monitor="val_loss",
         mode="min",
         prefix="",
     )
-    model = NeRFModel(cfg)
     trainer = Trainer(
         gpus=configargs.gpus,
         val_check_interval=cfg.experiment.validate_every,
@@ -476,7 +484,7 @@ if __name__ == "__main__":
         accumulate_grad_batches=4,
     )
 
-    logger.experiment.add_text("config", cfg.dump(), 0)
-    logger.experiment.add_text("params", ModelSummary(model, trainer.weights_summary).__str__(), 0)
+    logger.experiment.add_text("config", f"\t{cfg.dump()}".replace("\n", "\n\t"), 0)
+    logger.experiment.add_text("params", f"\t{ModelSummary(model, trainer.weights_summary).__str__()}".replace("\n", "\n\t"), 0)
 
     trainer.fit(model)

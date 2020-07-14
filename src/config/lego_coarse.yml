@@ -9,7 +9,7 @@ experiment:
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 10000
+  validate_every: 4000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -41,11 +41,12 @@ dataset:
 models:
   # Coarse model.
   # Name of the torch.nn.Module class that implements the model.
-  coarse_type: SimpleModel
+  coarse_type: RotFlexibleNeRFModel
   coarse:
     # Number of layers in the model.
-    hidden_layers: 2
-    skip_count: 0
+    hidden_layers: 8
+    skip_count: 3
+    encoding: fastrot
     # Number of view dependent layers(-1 for no view dependence)
     hidden_layers_view: -1
     # Size of the hidden layers
@@ -58,7 +59,7 @@ models:
     log_sampling_xyz: True
     # Number of encoding functions to use in the positional encoding
     # of the coordinates.
-    num_encoding_fn_xyz: 192
+    num_encoding_fn_xyz: 64
     # Whether to include the direction itself in its positional encoding.
     include_input_dir: True
     # Number of encoding functions to use in the positional encoding
@@ -67,6 +68,7 @@ models:
     # Whether or not to perform log sampling in the positional encoding
     # of the direction.
     log_sampling_dir: True
+    use_viewdirs: True
 
 # Optimizer params.
 optimizer:

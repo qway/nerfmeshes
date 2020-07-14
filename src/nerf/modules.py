@@ -460,3 +460,26 @@ class ResBlock(torch.nn.Module):
 
     def forward(self, x):
         return self.l0(x) + x
+
+class FastRotPos(torch.nn.Module):
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super(FastRotPos, self).__init__()
+        b = torch.zeros((in_features, out_features))
+        b.normal_()
+        b /= b.norm(dim=0)
+        multiplier = 2.0 ** (torch.rand((1, out_features)) * weight_multiplier) - 1
+        self.register_buffer("b", (b * multiplier).detach())
+
+    def forward(self, x):
+        x = torch.matmul(x, self.b)
+        return torch.cat([torch.sin(x), torch.cos(x)], dim=-1)
+
+    def output_size(self):
+        return 2 * self.b.shape[1]
+
+
+def get_encoding(encoding):
+    return {
+        "fastrot": FastRotPos,
+        "spatial": SpatialEmbedding,
+    }[encoding]

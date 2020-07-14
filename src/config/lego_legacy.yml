@@ -1,7 +1,7 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: colmap-mountainbike
+  id: lego-lowres3
   # Experiment logs will be stored at "logdir"/"id"
   logdir: logs
   # Seed for random number generators (for repeatability).
@@ -9,7 +9,7 @@ experiment:
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 300
+  validate_every: 3000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -18,17 +18,24 @@ experiment:
 # Dataset parameters.
 dataset:
   # Type of dataset (Blender vs LLFF vs DeepVoxels vs something else)
-  type: colmap
+  type: blender
   # Base directory of dataset.
-  basedir: ../data/mountainbike
+  basedir: ../data/nerf_synthetic/lego
+  # Optionally, provide a path to the pre-cached dataset dir. This
+  # overrides the other dataset options.
+  cachedir: cache/legocache200
+  # For the Blender datasets (synthetic), optionally return images
+  # at half the original resolution of 800 x 800, to save space.
+  half_res: True
+  # Stride (include one per "testskip" images in the dataset).
+  testskip: 1
   # Do not use NDC (normalized device coordinates). Usually True for
   # synthetic (Blender) datasets.
   no_ndc: True
   # Near clip plane (clip all depth values closer than this threshold).
-  near: 1
+  near: 2
   # Far clip plane (clip all depth values farther than this threshold).
-  far: 3
-  downscale_factor: 1
+  far: 6
 
 # Model parameters.
 models:
@@ -37,7 +44,7 @@ models:
   coarse_type: FlexibleNeRFModel
   coarse:
     # Number of layers in the model.
-    num_layers: 4
+    num_layers: 8
     # Number of hidden units in each layer of the MLP (multi-layer
     # perceptron).
     hidden_size: 128
@@ -64,6 +71,7 @@ models:
     # of the direction.
     log_sampling_dir: True
   # Fine model.
+  # Name of the torch.nn.Module class that implements the model.
   fine_type: FlexibleNeRFModel
   fine:
     # Number of layers in the model.
@@ -76,7 +84,7 @@ models:
     skip_connect_every: 3
     # Number of encoding functions to use in the positional encoding
     # of the coordinates.
-    num_encoding_fn_xyz: 15
+    num_encoding_fn_xyz: 10
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -103,10 +111,10 @@ optimizer:
  
 # Learning rate schedule.
 scheduler:
-  type: StepLR
-  options:
-    step_size: 10
-    gamma: 0.2
+  # Exponentially decay learning rate (in 1000 steps)
+  lr_decay: 250
+  # Rate at which to apply this decay.
+  lr_decay_factor: 0.1
 
 # NeRF parameters.
 nerf:
@@ -120,7 +128,7 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 2096  # 32 * 32 * 4
+    num_random_rays: 8192  # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
     chunksize: 8192  # 131072  # 1024 * 32
@@ -129,7 +137,7 @@ nerf:
     # Number of depth samples per ray for the coarse network.
     num_coarse: 64
     # Number of depth samples per ray for the fine network.
-    num_fine: 128
+    num_fine: 64
     # Whether to render models using a white background.
     white_background: False
     # Standard deviation of noise to be added to the radiance field when

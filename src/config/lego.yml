@@ -41,16 +41,16 @@ dataset:
 models:
   # Coarse model.
   # Name of the torch.nn.Module class that implements the model.
-  coarse_type: FlexibleNeRFModel
+  coarse_type: RotFlexibleNeRFModel
   coarse:
     # Number of layers in the model.
-    num_layers: 8
-    # Number of hidden units in each layer of the MLP (multi-layer
-    # perceptron).
+    hidden_layers: 8
+    skip_count: 3
+    encoding: fastrot
+    # Number of view dependent layers(-1 for no view dependence)
+    hidden_layers_view: -1
+    # Size of the hidden layers
     hidden_size: 128
-    # Add a skip connection once in a while. Note: This parameter
-    # won't take affect unless num_layers > skip_connect_every.
-    skip_connect_every: 3
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -59,9 +59,7 @@ models:
     log_sampling_xyz: True
     # Number of encoding functions to use in the positional encoding
     # of the coordinates.
-    num_encoding_fn_xyz: 10
-    # Additionally use viewing directions as input.
-    use_viewdirs: True
+    num_encoding_fn_xyz: 64
     # Whether to include the direction itself in its positional encoding.
     include_input_dir: True
     # Number of encoding functions to use in the positional encoding
@@ -70,51 +68,50 @@ models:
     # Whether or not to perform log sampling in the positional encoding
     # of the direction.
     log_sampling_dir: True
+    use_viewdirs: False
   # Fine model.
   # Name of the torch.nn.Module class that implements the model.
-  fine_type: FlexibleNeRFModel
+  fine_type: RotFlexibleNeRFModel
   fine:
     # Number of layers in the model.
-    num_layers: 8
-    # Number of hidden units in each layer of the MLP (multi-layer
-    # perceptron).
+    hidden_layers: 8
+    skip_count: 3
+    encoding: fastrot
+    # Number of view dependent layers(-1 for no view dependence)
+    hidden_layers_view: -1
+    # Size of the hidden layers
     hidden_size: 128
-    # Add a skip connection once in a while. Note: This parameter
-    # won't take affect unless num_layers > skip_connect_every.
-    skip_connect_every: 3
-    # Number of encoding functions to use in the positional encoding
-    # of the coordinates.
-    num_encoding_fn_xyz: 10
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
     # Whether or not to perform log sampling in the positional encoding
     # of the coordinates.
     log_sampling_xyz: True
-    # Additionally use viewing directions as input.
-    use_viewdirs: True
+    # Number of encoding functions to use in the positional encoding
+    # of the coordinates.
+    num_encoding_fn_xyz: 128
     # Whether to include the direction itself in its positional encoding.
     include_input_dir: True
-    # Number of encoding functions to use in the positional encoding of
-    # the direction.
+    # Number of encoding functions to use in the positional encoding
+    # of the direction.
     num_encoding_fn_dir: 4
     # Whether or not to perform log sampling in the positional encoding
     # of the direction.
     log_sampling_dir: True
+    use_viewdirs: True
 
 # Optimizer params.
 optimizer:
   # Name of the torch.optim class used for optimization.
   type: Adam
-  # Learning rate.
+  # Learning rate. Default 5.0E-3
   lr: 5.0E-3
- 
+
 # Learning rate schedule.
 scheduler:
-  # Exponentially decay learning rate (in 1000 steps)
-  lr_decay: 250
-  # Rate at which to apply this decay.
-  lr_decay_factor: 0.1
+  type: ReduceLROnPlateau
+  options:
+    mode: min
 
 # NeRF parameters.
 nerf:
@@ -128,10 +125,10 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 8192  # 32 * 32 * 4
+    num_random_rays: 4096 # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
-    chunksize: 8192  # 131072  # 1024 * 32
+    chunksize: 2048  # 131072  # 1024 * 32
     # Whether or not to perturb the sampled depth values.
     perturb: True
     # Number of depth samples per ray for the coarse network.
@@ -145,6 +142,8 @@ nerf:
     radiance_field_noise_std: 0.2
     # Sample linearly in disparity space, as opposed to in depth space.
     lindisp: False
+    # Amount of regularization on luminance
+    lumi_lambda: 0.0001
   # Validation-specific parameters.
   validation:
     # Number of random rays to retain from each image.
