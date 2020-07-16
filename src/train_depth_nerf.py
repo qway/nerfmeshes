@@ -20,7 +20,7 @@ from nerf.var import (run_one_iter_of_nerf)
 
 
 def main():
-    torch.set_printoptions(threshold = 100, edgeitems = 50)
+    torch.set_printoptions(threshold = 100, edgeitems = 50, precision = 7)
 
     parser = argparse.ArgumentParser()
 
@@ -110,10 +110,15 @@ def main():
 
     # Initialize optimizer.
     trainable_parameters = list(model_coarse.parameters())
-    if model_fine is not None:
-        trainable_parameters += list(model_fine.parameters())
+    # if model_fine is not None:
+    #     trainable_parameters += list(model_fine.parameters())
+
     optimizer = getattr(torch.optim, cfg.optimizer.type)(
         trainable_parameters, lr=cfg.optimizer.lr
+    )
+
+    optimizer_fine = getattr(torch.optim, cfg.optimizer.type)(
+        list(model_fine.parameters()), lr=cfg.optimizer.lr
     )
 
     # Setup logging.
@@ -224,7 +229,7 @@ def main():
             depth_data_s = depth_data_target[select_inds[:, 0], select_inds[:, 1]]
 
             then = time.time()
-            rgb_coarse, _, _, depth_coarse, rgb_fine, _, _, depth_fine = run_one_iter_of_nerf(
+            rgb_coarse, depth_coarse, depth_std_coarse, rgb_fine, depth_fine, depth_std_fine = run_one_iter_of_nerf(
                 H,
                 W,
                 focal,
@@ -255,60 +260,49 @@ def main():
 
         # depth loss
         coarse_depth_loss, fine_depth_loss = torch.tensor(0), torch.tensor(0)
+        coarse_depth_empty, coarse_depth_space = torch.tensor(0), torch.tensor(0)
+        mask = depth_data_s > 0
         if depth_data is not None:
             coarse_depth_loss = torch.nn.functional.mse_loss(
                 depth_coarse, depth_data_s
             )
 
-            # coarse_depth_small_loss = torch.nn.functional.mse_loss(
-            #     depth_coarse[~mask], depth_data_s[~mask]
-            # )* 1e-1
+            coarse_depth_empty = torch.nn.functional.mse_loss(
+                depth_coarse[~mask], depth_data_s[~mask]
+            )
+
+            coarse_depth_space = torch.nn.functional.mse_loss(
+                depth_coarse[mask], depth_data_s[mask]
+            )
 
             if depth_fine is not None:
                 fine_depth_loss = torch.nn.functional.mse_loss(
                     depth_fine, depth_data_s
                 )
-                # fine_depth_loss = torch.abs(depth_fine - depth_data_s).mean()
-                # fine_depth_small_loss = torch.nn.functional.mse_loss(
-                #     depth_fine[~mask], depth_data_s[~mask]
-                # ) * 1e-1
 
-        # loss = coarse_loss + coarse_depth_loss * 1e-2
-        loss = coarse_loss + fine_loss + (coarse_depth_loss + fine_depth_loss) * 1e-2
-        psnr = mse2psnr(fine_loss.item())
 
-        # if depth_data is not None and fine_depth_loss is not None:
-        #     if i >= 5000:
-        #         print(depth_coarse)
-        #         print(depth_fine)
-        #         print(depth_data_s)
-        #         exit(-1)
-        #
-        #     loss_depth = fine_depth_loss + coarse_depth_loss + coarse_depth_small_loss + fine_depth_small_loss
-        #     loss += loss_depth * 1e-1 / 4
+        #loss = coarse_loss + coarse_depth_loss * 1e-2
+        loss = coarse_loss + coarse_depth_loss * 1e-2
+        # loss_b = fine_loss + fine_depth_loss * 1e-2
+        # loss = coarse_loss + fine_loss + (coarse_depth_loss + fine_depth_loss)
+        psnr = mse2psnr(coarse_loss.item())
 
         loss.backward()
+        #loss_b.backward()
         optimizer.step()
+        # optimizer_fine.step()
+
         optimizer.zero_grad()
+        optimizer_fine.zero_grad()
 
         # Learning rate updates
         num_decay_steps = cfg.scheduler.lr_decay * 1000
         lr_new = cfg.optimizer.lr * (
             cfg.scheduler.lr_decay_factor ** (i / num_decay_steps)
         )
+
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr_new
-
-        # if i > 2000:
-        #     torch.save({
-        #         'depth_coarse': depth_coarse.detach().cpu(),
-        #         'depth_data_s': depth_data_s.detach().cpu(),
-        #         'z_samples': z_samples.detach().cpu(),
-        #         'weights': weights.detach().cpu(),
-        #         'radiance': radi.detach().cpu(),
-        #     }, "../../data/output/train_sampling_volume_render_one_loss.pt")
-        #
-        #     exit(-1)
 
         if i % cfg.experiment.print_every == 0 or i == cfg.experiment.train_iters - 1:
             tqdm.write(
@@ -318,11 +312,15 @@ def main():
                 + str(loss.item())
                 + " Coarse: "
                 + str(coarse_loss.item())
+                + " CD: "
+                + str(coarse_depth_loss.item())
+                + " CDEmpty: "
+                + str(coarse_depth_empty.item())
+                + " CDSpace: "
+                + str(coarse_depth_space.item())
                 + " Fine: "
                 + str(fine_loss.item())
-                + " Coarse Depth: "
-                + str(coarse_depth_loss.item())
-                + " Fine Depth: "
+                + " FD: "
                 + str(fine_depth_loss.item())
                 + " PSNR: "
                 + str(psnr)
@@ -354,7 +352,7 @@ def main():
                 if USE_CACHED_DATASET:
                     datafile = np.random.choice(validation_paths)
                     cache_dict = torch.load(datafile)
-                    rgb_coarse, _, _, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
+                    rgb_coarse, _, rgb_fine, _ = run_one_iter_of_nerf(
                         cache_dict["height"],
                         cache_dict["width"],
                         cache_dict["focal_length"],
@@ -376,7 +374,7 @@ def main():
                         H, W, focal, pose_target
                     )
 
-                    rgb_coarse, _, _, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
+                    rgb_coarse, _, _, rgb_fine, _, _, = run_one_iter_of_nerf(
                         H,
                         W,
                         focal,
@@ -398,6 +396,7 @@ def main():
                     loss = fine_loss
                 else:
                     loss = coarse_loss
+
                 loss = coarse_loss
                 psnr = mse2psnr(coarse_loss.item())
                 writer.add_scalar("validation/loss", coarse_loss.item(), i)
