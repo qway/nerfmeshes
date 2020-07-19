@@ -114,7 +114,8 @@ def predict_and_render_radiance(
             encode_position_fn,
             encode_direction_fn,
         )
-        rgb_fine, disp_fine, acc_fine, _, _ = volume_render_radiance_field(
+
+        rgb_fine, disp_fine, _, _, acc_fine = volume_render_radiance_field(
             radiance_field,
             z_vals,
             rd,
