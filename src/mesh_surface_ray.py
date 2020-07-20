@@ -1,9 +1,8 @@
 import argparse
 import numpy as np
 import torch
-import torchvision
 import yaml
-import math
+import torchvision
 
 from nerf.train_utils import predict_and_render_radiance
 from tqdm import tqdm
@@ -11,12 +10,22 @@ from tqdm import tqdm
 from nerf import (
     CfgNode,
     get_ray_bundle,
-    load_blender_data,
-    load_llff_data,
+    pose_spherical,
     models,
     get_embedding_function,
     run_one_iter_of_nerf,
 )
+
+
+def cast_to_image(tensor, i):
+    # Input tensor is (H, W, 3). Convert to (3, H, W).
+    tensor = tensor.permute(2, 0, 1)
+
+    # Convert to PIL Image and then np.array (output shape: (H, W, 3))
+    img = torchvision.transforms.ToPILImage()(tensor.detach().cpu())
+
+    # Save PIL image
+    img.save(f"sample_{i}.png", 'PNG')
 
 
 def export_obj(vertices, triangles, diffuse, normals, filename):
@@ -27,6 +36,7 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 
     with open(filename, 'w') as fh:
 
+        print(f"Total vertices {len(vertices)}")
         for index, v in enumerate(vertices):
             fh.write("v {} {} {}".format(*v))
             if len(diffuse) > index:
@@ -48,59 +58,58 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position_fn, encode_direction_fn, device):
 
     # Mesh Extraction
-    radius = 2
+    samples_dimen = 8
     plane_near = 0
-    plane_far = 4
+    plane_far = 4.0
 
     # Data
     vertices, triangles, normals, diffuse = [], [], [], []
+    render_poses = torch.stack(
+        [
+            torch.from_numpy(pose_spherical(angleY, -30, plane_far)).float()
+            for angleY in np.linspace(-180, 180, samples_dimen, endpoint = False)
+            # for angleX in np.linspace(-90, 90, samples_dimen // 2, endpoint = True)
+        ], dim = 0
+    )
 
-    for _ in tqdm(range(256)):
+    hwf = [ 800.0, 800.0, 1111.1111 ]
 
-        # azimuthal, polar angle
-        alpha, omega = torch.rand(1024, device = device) * 2 * math.pi, torch.rand(1024, device = device) * math.pi
-        x = radius * torch.sin(alpha) * torch.cos(omega)
-        y = radius * torch.sin(alpha) * torch.sin(omega)
-        z = radius * torch.cos(alpha)
+    for i, pose in enumerate(tqdm(render_poses)):
+        pose = pose[:3, :4].to(device)
 
-        # Ray origins
-        ray_origins = torch.stack((x, y, z), -1)
+        # Ray origins & directions
+        ray_origins, ray_directions = get_ray_bundle(hwf[0], hwf[1], hwf[2], pose)
 
-        # Ray directions
-        ray_directions = -(ray_origins / ray_origins.norm(dim = -1)[:, None])
+        # cfg.nerf['validation']['num_coarse'] = 64
+        # cfg.nerf['validation']['num_fine'] = 64
+        with torch.no_grad():
+            _, _, _, rgb_fine, _, depth_fine = run_one_iter_of_nerf(
+                hwf[0], hwf[1], hwf[2],
+                model_coarse,
+                model_fine,
+                ray_origins,
+                ray_directions,
+                cfg,
+                mode="validation",
+                encode_position_fn=encode_position_fn,
+                encode_direction_fn=encode_direction_fn,
+            )
 
-        near = plane_near * torch.ones_like(ray_directions[..., :1])
-        far = plane_far * torch.ones_like(ray_directions[..., :1])
+            # mask = depth_fine >= plane_far - 1.2
+            mask = (depth_fine > 0) * ((rgb_fine == torch.zeros_like(rgb_fine)).sum(-1) < 3)
 
-        # Generating ray batches
-        rays = torch.cat((ray_origins, ray_directions, near, far), dim = -1)
-        if cfg.nerf.use_viewdirs:
-            # Provide ray directions as input
-            view_dirs = ray_directions / ray_directions.norm(p = 2, dim = -1).unsqueeze(-1)
-            rays = torch.cat((rays, view_dirs.view((-1, 3))), dim = -1)
+            ray_origins, ray_directions, depth_fine = ray_origins[mask], ray_directions[mask], depth_fine[mask]
+            rgb_fine = rgb_fine[mask]
 
-        # move to appropriate device
-        ray_batch = rays.to(device)
+            depth_fine = depth_fine[..., None]
+            surface_points = ray_origins + ray_directions * depth_fine
 
-        _, _, _, diffuse_fine, _, depth_fine = predict_and_render_radiance(
-            ray_batch, model_coarse,
-            model_fine, cfg,
-            mode = "validation",
-            encode_position_fn = encode_position_fn,
-            encode_direction_fn = encode_direction_fn,
-        )
-
-        surface_points = ray_origins + ray_directions * depth_fine[:, None]
-
-        vertices.append(surface_points.cpu().detach())
-        diffuse.append(diffuse_fine.cpu().detach())
+            vertices.append(surface_points.view(-1, 3).cpu().detach())
+            diffuse.append(rgb_fine.view(-1, 3).cpu().detach())
 
     # Query the whole diffuse map
     diffuse_fine = torch.cat(diffuse, dim = 0).numpy()
     vertices_fine = torch.cat(vertices, dim = 0).numpy()
-
-    print(diffuse_fine.shape)
-    print(vertices_fine.shape)
 
     # Export model
     export_obj(vertices_fine, [], diffuse_fine, [], "lego-sampling.obj")

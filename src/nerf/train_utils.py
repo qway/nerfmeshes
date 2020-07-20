@@ -123,6 +123,7 @@ def predict_and_render_radiance(
                 options.nerf, mode
             ).radiance_field_noise_std,
             white_background=getattr(options.nerf, mode).white_background,
+            last = True
         )
 
     return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
@@ -168,7 +169,7 @@ def run_one_iter_of_nerf(
     if options.nerf.use_viewdirs:
         rays = torch.cat((rays, viewdirs), dim=-1)
 
-    batches = get_minibatches(rays, chunksize=getattr(options.nerf, mode).chunksize)
+    batches = get_minibatches(rays, 65536)
     pred = [
         predict_and_render_radiance(
             batch,
