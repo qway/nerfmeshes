@@ -20,6 +20,29 @@ from nerf import (
     mse2psnr,
 )
 
+def export_obj(vertices, triangles, diffuse, normals, filename):
+    """
+    Exports a mesh in the (.obj) format.
+    """
+    print('Writing to obj')
+
+    with open(filename, 'w') as fh:
+
+        for index, v in enumerate(vertices):
+            fh.write("v {} {} {} {} {} {}\n".format(*v, *diffuse[index]))
+
+        for n in normals:
+            fh.write("vn {} {} {}\n".format(*n))
+
+        for f in triangles:
+            fh.write("f")
+            for index in f:
+                fh.write(" {}//{}".format(index + 1, index + 1))
+
+            fh.write("\n")
+
+    print('Finished writing to obj')
+
 
 def cast_to_image(tensor, dataset_type):
     # Input tensor is (H, W, 3). Convert to (3, H, W).
@@ -35,6 +58,19 @@ def cast_to_disparity_image(tensor):
     img = (tensor - tensor.min()) / (tensor.max() - tensor.min())
     img = img.clamp(0, 1) * 255
     return img.detach().cpu().numpy().astype(np.uint8)
+
+
+def export_point_cloud_sample(it, ray_origins, ray_directions, depth_fine, dep_target):
+    vertices_output = (ray_origins + ray_directions * depth_fine[..., None]).view(-1, 3)
+    vertices_target = (ray_origins + ray_directions * dep_target[..., None]).view(-1, 3)
+    vertices = torch.cat((vertices_output, vertices_target), dim = 0)
+    diffuse_output = torch.zeros_like(vertices_output)
+    diffuse_output[:, 0] = 1.0
+    diffuse_target = torch.zeros_like(vertices_target)
+    diffuse_target[:, 2] = 1.0
+    diffuse = torch.cat((diffuse_output, diffuse_target), dim = 0)
+    normals = torch.cat((-ray_directions.view(-1, 3), -ray_directions.view(-1, 3)), dim = 0)
+    export_obj(vertices, [], diffuse, normals, f"{it:04d}.obj")
 
 
 def main():
@@ -56,7 +92,7 @@ def main():
     )
     parser.add_argument('--synthesis-images', dest = 'synthesis_images', action = 'store_true')
     parser.add_argument('--no-synthesis-images', dest = 'synthesis_images', action = 'store_false')
-    parser.set_defaults(synthesis_images = True)
+    parser.set_defaults(synthesis_images = False)
 
     configargs = parser.parse_args()
 
@@ -72,12 +108,12 @@ def main():
         # Load blender dataset
         images, poses, depth_imgs, render_poses, hwf, i_split = load_blender_data(
             cfg.dataset.basedir,
-            categories=["test", "val"],
+            categories=["test_high_res"],
             half_res=cfg.dataset.half_res,
             testskip=cfg.dataset.testskip,
         )
 
-        i_test, i_val = i_split
+        i_test = i_split[0]
         H, W, focal = hwf
         H, W = int(H), int(W)
     elif cfg.dataset.type.lower() == "llff":
@@ -159,7 +195,7 @@ def main():
 
     # Evaluation loop
     times_per_image = []
-    for i, index in enumerate(tqdm(i_test)):
+    for i, index in enumerate(tqdm(torch.randperm(i_test.shape[0]))):
         pose = eval_poses[index].to(device)
         img_target = images[index].to(device)
         dep_target = depth_imgs[index].to(device)
@@ -170,7 +206,7 @@ def main():
         with torch.no_grad():
             pose = pose[:3, :4]
             ray_origins, ray_directions = get_ray_bundle(hwf[0], hwf[1], hwf[2], pose)
-            rgb_coarse, disp_coarse, _, depth_coarse, rgb_fine, disp_fine, _, depth_fine, z_vals, weights = run_one_iter_of_nerf(
+            rgb_coarse, disp_coarse, _, depth_coarse, rgb_fine, disp_fine, _, depth_fine = run_one_iter_of_nerf(
                 hwf[0],
                 hwf[1],
                 hwf[2],
@@ -201,29 +237,29 @@ def main():
         coarse_depth_loss = torch.nn.functional.mse_loss(depth_coarse, dep_target)
         fine_depth_loss = torch.nn.functional.mse_loss(depth_fine, dep_target)
 
-        torch.save({
-            # "z_vals": z_vals[400, 400, :],
-            # "weights": weights[400, 400, :],
-            # "depth_coarse": depth_coarse[400, 400],
-            "depth_fine": depth_fine,
-            # "dep_target": dep_target[400, 400],
-            # "z_vals_empty": z_vals[0, 0].contiguous().detach().cpu(),
-            # "weights_empty": weights[0, 0].contiguous().detach().cpu()
-            # "depth_coarse_empty": depth_coarse[0, 0].contiguous().detach().cpu(),
-            # "depth_fine_empty": depth_fine[0, 0].contiguous().detach().cpu(),
-            # "dep_target_empty": dep_target[0, 0].contiguous().detach().cpu()
-        }, "../../data/output/eval_sample_depth_high_res.pt")
-        print("Model saved")
-
         print(f"Loss MSE image {i}: Coarse Loss: {coarse_loss} / Fine Loss: {fine_loss}")
         print(f"Loss PSNR image {i}: Coarse PSNR: {mse2psnr(coarse_loss.item())} / Fine PSNR: {mse2psnr(fine_loss.item())}")
         print(f"Loss Depth image {i}: Coarse Depth: {coarse_depth_loss} / Fine Depth: {fine_depth_loss}")
 
+        export_point_cloud_sample(i, ray_origins, ray_directions, depth_fine, dep_target)
+
         times_per_image.append(time.time() - start)
         if configargs.save_dir:
+
+            savefile = os.path.join(configargs.save_dir, f"{i:04d} depth_target.png")
+            imageio.imwrite(savefile, cast_to_disparity_image(dep_target))
+
+            savefile = os.path.join(configargs.save_dir, f"{i:04d} depth_output.png")
+            imageio.imwrite(savefile, cast_to_disparity_image(depth_fine))
+
             savefile = os.path.join(configargs.save_dir, f"{i:04d}.png")
             imageio.imwrite(
                 savefile, cast_to_image(rgb[..., :3], cfg.dataset.type.lower())
+            )
+
+            savefile = os.path.join(configargs.save_dir, f"{i:04d} target.png")
+            imageio.imwrite(
+                savefile, cast_to_image(img_target[..., :3], cfg.dataset.type.lower())
             )
 
             if configargs.save_disparity_image:
@@ -232,7 +268,8 @@ def main():
 
         tqdm.write(f"Avg time per image: {sum(times_per_image) / (i + 1)}")
 
-        exit(-1)
+        # if (i + 1) % 5 == 0:
+        #     exit(-1)
 
 
 if __name__ == "__main__":

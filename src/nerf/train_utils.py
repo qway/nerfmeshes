@@ -99,7 +99,7 @@ def predict_and_render_radiance(
             getattr(options.nerf, mode).num_fine,
             det=(getattr(options.nerf, mode).perturb == 0.0),
         )
-        z_samples = z_samples.detach()
+        # z_samples = z_samples.detach()
 
         z_vals, _ = torch.sort(torch.cat((z_vals, z_samples), dim=-1), dim=-1)
 
