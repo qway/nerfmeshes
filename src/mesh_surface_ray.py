@@ -17,17 +17,6 @@ from nerf import (
 )
 
 
-def cast_to_image(tensor, i):
-    # Input tensor is (H, W, 3). Convert to (3, H, W).
-    tensor = tensor.permute(2, 0, 1)
-
-    # Convert to PIL Image and then np.array (output shape: (H, W, 3))
-    img = torchvision.transforms.ToPILImage()(tensor.detach().cpu())
-
-    # Save PIL image
-    img.save(f"sample_{i}.png", 'PNG')
-
-
 def export_obj(vertices, triangles, diffuse, normals, filename):
     """
     Exports a mesh in the (.obj) format.
@@ -58,7 +47,8 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position_fn, encode_direction_fn, device):
 
     # Mesh Extraction
-    samples_dimen = 8
+    samples_dimen_y = 8
+    samples_dimen_x = 1
     plane_near = 0
     plane_far = 4.0
 
@@ -66,9 +56,9 @@ def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position
     vertices, triangles, normals, diffuse = [], [], [], []
     render_poses = torch.stack(
         [
-            torch.from_numpy(pose_spherical(angleY, -30, plane_far)).float()
-            for angleY in np.linspace(-180, 180, samples_dimen, endpoint = False)
-            # for angleX in np.linspace(-90, 90, samples_dimen // 2, endpoint = True)
+            torch.from_numpy(pose_spherical(angleY, angleX, plane_far)).float()
+            for angleY in np.linspace(-180, 180, samples_dimen_y, endpoint = False)
+            for angleX in np.linspace(-60, -30, samples_dimen_x, endpoint = True)
         ], dim = 0
     )
 
@@ -95,8 +85,7 @@ def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position
                 encode_direction_fn=encode_direction_fn,
             )
 
-            # mask = depth_fine >= plane_far - 1.2
-            mask = (depth_fine > 0) * ((rgb_fine == torch.zeros_like(rgb_fine)).sum(-1) < 3)
+            mask = (depth_fine > 0)
 
             ray_origins, ray_directions, depth_fine = ray_origins[mask], ray_directions[mask], depth_fine[mask]
             rgb_fine = rgb_fine[mask]
@@ -105,14 +94,18 @@ def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position
             surface_points = ray_origins + ray_directions * depth_fine
 
             vertices.append(surface_points.view(-1, 3).cpu().detach())
+            normals.append((-ray_directions).view(-1, 3).cpu().detach())
             diffuse.append(rgb_fine.view(-1, 3).cpu().detach())
 
     # Query the whole diffuse map
     diffuse_fine = torch.cat(diffuse, dim = 0).numpy()
     vertices_fine = torch.cat(vertices, dim = 0).numpy()
+    normals_fine = torch.cat(normals, dim = 0).numpy()
+
+    print(normals_fine.shape)
 
     # Export model
-    export_obj(vertices_fine, [], diffuse_fine, [], "lego-sampling.obj")
+    export_obj(vertices_fine, [], diffuse_fine, normals_fine, "lego-sampling.obj")
 
 
 def main():

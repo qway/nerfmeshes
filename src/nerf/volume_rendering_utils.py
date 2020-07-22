@@ -52,10 +52,8 @@ def volume_render_radiance_field(
         rgb_map = rgb_map + (1.0 - acc_map[..., None])
 
     if last:
-        mask = (sigma_a > 0).sum(-1) > 0
-        indices = sigma_a.argmax(-1)
-        depth_map = depth_values.gather(-1, indices[:, None])
-        depth_map = depth_map.squeeze(-1)
-        depth_map[~mask] = 0
+        depth_weight = weights.sum(-1)
+        depth_mask = depth_weight < 1.0
+        depth_map[depth_mask] = 0
 
     return rgb_map, disp_map, acc_map, weights, depth_map
