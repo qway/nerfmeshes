@@ -9,9 +9,9 @@ experiment:
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 50
+  validate_every: 5000
   # Number of training iterations after which to checkpoint.
-  save_every: 50
+  save_every: 5000
   # Number of training iterations after which to print progress.
   print_every: 100
 
@@ -50,8 +50,8 @@ models:
     # Number of view dependent layers(-1 for no view dependence)
     hidden_layers_view: -1
     # Size of the hidden layers
-    hidden_size: 32
-    #hidden_size: 128
+    #hidden_size: 32
+    hidden_size: 128
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -60,7 +60,7 @@ models:
     log_sampling_xyz: True
     # Number of encoding functions to use in the positional encoding
     # of the coordinates.
-    num_encoding_fn_xyz: 256
+    num_encoding_fn_xyz: 192
     # Whether to include the direction itself in its positional encoding.
     include_input_dir: True
     # Number of encoding functions to use in the positional encoding

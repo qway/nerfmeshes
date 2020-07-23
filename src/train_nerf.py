@@ -148,7 +148,7 @@ class NeRFModel(LightningModule):
             cfg.nerf.validation.radiance_field_noise_std,
             cfg.nerf.validation.white_background,
         )
-        self.sample_interval = RaySampleInterval(cfg.nerf.train.num_coarse)
+        self.sample_interval = RaySampleInterval(cfg.nerf.train.num_coarse, perturb=cfg.nerf.train.perturb)
         self.sample_pdf = SamplePDF(cfg.nerf.train.num_fine)
         if self.cfg.dataset.type == "scannet":
             self.sensor_data = None
