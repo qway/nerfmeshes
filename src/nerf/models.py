@@ -14,6 +14,7 @@ class FlexibleNeRFModel(torch.nn.Module):
         log_sampling_xyz=True,
         log_sampling_dir=True,
         use_viewdirs=True,
+        **kwargs
     ):
         super(FlexibleNeRFModel, self).__init__()
         self.encode_xyz = PositionalEncoding(
@@ -296,10 +297,11 @@ class RotFlexibleNeRFModel(torch.nn.Module):
         include_input_dir=True,
         log_sampling_dir=True,
         use_viewdirs=True,
+        encoding="spatial",
         **kwargs
     ):
         super(RotFlexibleNeRFModel, self).__init__()
-        self.encode_xyz = FastRotPos(
+        self.encode_xyz = get_encoding(encoding)(
             3, num_encoding_fn_xyz, 8
         )
         self.encode_dir = PositionalEncoding(

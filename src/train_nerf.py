@@ -455,11 +455,11 @@ if __name__ == "__main__":
 
     logdir = Path("../logs") / (cfg.experiment.id)
     os.makedirs(logdir, exist_ok=True)
-    runname = str(time.strftime("%y-%m-%d-%H:%M"))
+    runname = str(time.strftime("%y-%m-%d-%H:%M-"))
     if configargs.runname:
-        runname += "-"+configargs.runname
-    logger = TensorBoardLogger(logdir, "", runname)
-    logdir = logdir / runname
+        logger = TensorBoardLogger(logdir, "", runname + configargs.runname)
+    else:
+        logger = TensorBoardLogger(logdir, "", runname)
     #with open(os.path.join(logdir, "config.yml"), "w") as f:
     #   f.write(cfg.dump())  # cfg, f, default_flow_style=False)
     checkpoint_callback = ModelCheckpoint(
@@ -473,9 +473,9 @@ if __name__ == "__main__":
     trainer = Trainer(
         gpus=configargs.gpus,
         val_check_interval=cfg.experiment.validate_every,
-        default_root_dir="../logs",
+        default_root_dir=str(logdir),
         logger=logger,
-        checkpoint_callback=checkpoint_callback,
+        #checkpoint_callback=checkpoint_callback,
         # profiler=True, # Activate for very simple profiling
         # fast_dev_run=True, # Activate when debugging
         max_steps=cfg.experiment.train_iters,

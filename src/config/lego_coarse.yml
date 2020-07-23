@@ -1,7 +1,7 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: lego-simple
+  id: lego-simple-test
   # Experiment logs will be stored at "logdir"/"id"
   logdir: logs
   # Seed for random number generators (for repeatability).
@@ -9,9 +9,9 @@ experiment:
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 4000
+  validate_every: 50
   # Number of training iterations after which to checkpoint.
-  save_every: 5000
+  save_every: 50
   # Number of training iterations after which to print progress.
   print_every: 100
 
@@ -41,16 +41,17 @@ dataset:
 models:
   # Coarse model.
   # Name of the torch.nn.Module class that implements the model.
-  coarse_type: RotFlexibleNeRFModel
+  coarse_type: SimpleModel
   coarse:
     # Number of layers in the model.
-    hidden_layers: 8
-    skip_count: 3
+    hidden_layers: 3
+    skip_count: 1
     encoding: fastrot
     # Number of view dependent layers(-1 for no view dependence)
     hidden_layers_view: -1
     # Size of the hidden layers
-    hidden_size: 128
+    hidden_size: 32
+    #hidden_size: 128
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -59,7 +60,7 @@ models:
     log_sampling_xyz: True
     # Number of encoding functions to use in the positional encoding
     # of the coordinates.
-    num_encoding_fn_xyz: 64
+    num_encoding_fn_xyz: 256
     # Whether to include the direction itself in its positional encoding.
     include_input_dir: True
     # Number of encoding functions to use in the positional encoding

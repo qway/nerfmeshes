@@ -223,7 +223,9 @@ def main():
 
     print("Generating mesh texture...")
 
-    targets = torch.from_numpy(vertices) / N * 2 * limit - limit
+    #targets = torch.from_numpy(vertices) / N * 2 * limit - limit
+    targets = torch.from_numpy(vertices)
+
     inv_normals = -torch.from_numpy(normals)
     # Reorder coordinates
     targets = targets[:, [1, 0, 2]]

@@ -1,15 +1,15 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: colmap-mountainbike
+  id: colmap-stilllife
   # Experiment logs will be stored at "logdir"/"id"
   logdir: logs
   # Seed for random number generators (for repeatability).
   randomseed: 42  # Cause, why not?
   # Number of training iterations.
-  train_iters: 200000
+  train_iters: 150000
   # Number of training iterations after which to validate.
-  validate_every: 300
+  validate_every: 3000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -20,7 +20,7 @@ dataset:
   # Type of dataset (Blender vs LLFF vs DeepVoxels vs something else)
   type: colmap
   # Base directory of dataset.
-  basedir: ../data/mountainbike
+  basedir: ../data/stilllife
   # Do not use NDC (normalized device coordinates). Usually True for
   # synthetic (Blender) datasets.
   no_ndc: True
@@ -28,7 +28,7 @@ dataset:
   near: 1
   # Far clip plane (clip all depth values farther than this threshold).
   far: 3
-  downscale_factor: 1
+  downscale_factor: 2
 
 # Model parameters.
 models:
