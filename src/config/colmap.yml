@@ -1,17 +1,17 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: colmap-stilllife
+  id: colmap-buddha
   # Experiment logs will be stored at "logdir"/"id"
   logdir: logs
   # Seed for random number generators (for repeatability).
   randomseed: 42  # Cause, why not?
   # Number of training iterations.
-  train_iters: 150000
+  train_iters: 1500000
   # Number of training iterations after which to validate.
-  validate_every: 3000
+  validate_every: 30000
   # Number of training iterations after which to checkpoint.
-  save_every: 5000
+  save_every: 30000
   # Number of training iterations after which to print progress.
   print_every: 100
 
@@ -20,7 +20,7 @@ dataset:
   # Type of dataset (Blender vs LLFF vs DeepVoxels vs something else)
   type: colmap
   # Base directory of dataset.
-  basedir: ../data/stilllife
+  basedir: ../data/buddha
   # Do not use NDC (normalized device coordinates). Usually True for
   # synthetic (Blender) datasets.
   no_ndc: True
@@ -28,7 +28,7 @@ dataset:
   near: 1
   # Far clip plane (clip all depth values farther than this threshold).
   far: 3
-  downscale_factor: 2
+  downscale_factor: 1
 
 # Model parameters.
 models:

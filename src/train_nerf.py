@@ -481,7 +481,7 @@ if __name__ == "__main__":
         max_steps=cfg.experiment.train_iters,
         # log_gpu_memory=True,
         deterministic=True,
-        accumulate_grad_batches=4,
+        accumulate_grad_batches=cfg.nerf.train.chunksize//cfg.nerf.train.num_random_rays,
     )
 
     logger.experiment.add_text("config", f"\t{cfg.dump()}".replace("\n", "\n\t"), 0)

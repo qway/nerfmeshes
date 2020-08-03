@@ -44,14 +44,14 @@ models:
   coarse_type: SimpleModel
   coarse:
     # Number of layers in the model.
-    hidden_layers: 3
-    skip_count: 1
+    hidden_layers: 2
+    skip_count: 2
     encoding: fastrot
     # Number of view dependent layers(-1 for no view dependence)
     hidden_layers_view: -1
     # Size of the hidden layers
     #hidden_size: 32
-    hidden_size: 128
+    hidden_size: 256
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -60,7 +60,7 @@ models:
     log_sampling_xyz: True
     # Number of encoding functions to use in the positional encoding
     # of the coordinates.
-    num_encoding_fn_xyz: 192
+    num_encoding_fn_xyz: 64
     # Whether to include the direction itself in its positional encoding.
     include_input_dir: True
     # Number of encoding functions to use in the positional encoding
@@ -69,7 +69,7 @@ models:
     # Whether or not to perform log sampling in the positional encoding
     # of the direction.
     log_sampling_dir: True
-    use_viewdirs: True
+    use_viewdirs: False
 
 # Optimizer params.
 optimizer:
@@ -96,14 +96,15 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 4096 # 32 * 32 * 4
+    num_random_rays: 512 # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
-    chunksize: 2048  # 131072  # 1024 * 32
+    chunksize: 4096  # 131072  # 1024 * 32
+    #chunksize: 16384  # 131072  # 1024 * 32
     # Whether or not to perturb the sampled depth values.
     perturb: True
     # Number of depth samples per ray for the coarse network.
-    num_coarse: 64
+    num_coarse: 256
     # Number of depth samples per ray for the fine network.
     num_fine: 64
     # Whether to render models using a white background.
@@ -119,13 +120,13 @@ nerf:
   validation:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    chunksize: 8192   # 1024 * 32
+    chunksize: 4096   # 1024 * 32
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
-    num_coarse: 64
+    num_coarse: 256
     # Number of depth samples per ray for the fine network.
-    num_fine: 64
+    num_fine: 128
     # Whether to render models using a white background.
     white_background: False
     # Standard deviation of noise to be added to the radiance field when

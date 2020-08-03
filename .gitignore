@@ -131,7 +131,7 @@ dmypy.json
 
 #Custom
 models
-data
+/data
 .idea
 **/cache/
 **/*logs/

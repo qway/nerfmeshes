@@ -10,8 +10,17 @@ from pathlib import Path
 from skimage import measure
 from scipy.spatial import KDTree
 from tqdm import tqdm
-import marching_cubes as mcubes
+try:
+    import marching_cubes as mcubes
+except:
+    print("Error, justus' version of pymcubes not installed!")
+    print("""
+Run the following commands(Note that its currently not possible to install through a package manager, since it depends on eigen):
 
+poetry shell
+cd ../additional_dependencies/PyMarchingCubes
+python setup.py install
+""")
 from nerf import (
     CfgNode,
     models,
@@ -63,7 +72,7 @@ def main():
         "--save-dir",
         type=str,
         help="Save mesh to this directory, if specified.",
-        default="../meshes/",
+        default=".",
     )
     parser.add_argument(
         "--super-sampling",
@@ -98,7 +107,7 @@ def main():
     # Mesh Extraction
     N = args.res
     iso_value = 17
-    batch_size = 300*8
+    batch_size = 160*8*8
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
     distance_length = 0.001

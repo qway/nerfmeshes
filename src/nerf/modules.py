@@ -478,8 +478,32 @@ class FastRotPos(torch.nn.Module):
         return 2 * self.b.shape[1]
 
 
+class FlexiblePositionalEncoding(torch.nn.Module):
+    """Apply positional encoding to the input.
+    """
+
+    def __init__(self, in_features, out_features, weight_multiplier=1.0):
+        super().__init__()
+        self.num_encoding_functions = out_features
+        frequency_bands = 2.0 ** torch.linspace(
+                0.0, weight_multiplier, out_features
+            )
+        frequency_bands = (torch.eye(in_features)[..., None] * frequency_bands).view(in_features, -1)
+        self.register_buffer("frequency_bands", frequency_bands)
+        self.in_features = in_features
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = torch.matmul(x, self.frequency_bands)
+        encoding = torch.cat([x, torch.sin(out), torch.cos(out)], dim=-1)
+        return encoding
+
+    def output_size(self):
+        return 2 * self.frequency_bands.shape[-1] + self.in_features
+
+
 def get_encoding(encoding):
     return {
         "fastrot": FastRotPos,
         "spatial": SpatialEmbedding,
+        "positional": FlexiblePositionalEncoding,
     }[encoding]
