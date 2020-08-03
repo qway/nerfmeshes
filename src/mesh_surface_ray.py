@@ -2,9 +2,8 @@ import argparse
 import numpy as np
 import torch
 import yaml
-import torchvision
 
-from nerf.train_utils import predict_and_render_radiance
+from plyfile import PlyData, PlyElement
 from tqdm import tqdm
 
 from nerf import (
@@ -27,14 +26,14 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 
         print(f"Total vertices {len(vertices)}")
         for index, v in enumerate(vertices):
+            fh.write("vn {} {} {}".format(*normals[index]))
+            fh.write("\n")
+
             fh.write("v {} {} {}".format(*v))
             if len(diffuse) > index:
                 fh.write(" {} {} {}".format(*diffuse[index]))
 
             fh.write("\n")
-
-        for n in normals:
-            fh.write("vn {} {} {}\n".format(*n))
 
         for f in triangles:
             fh.write("f")
@@ -44,13 +43,39 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
             fh.write("\n")
 
 
+def export_ply(vertices, diffuse, normals, filename):
+    names = 'x, y, z, nx, ny, nz, red, green, blue'
+    formats = 'f4, f4, f4, f4, f4, f4, u1, u1, u1'
+    arr = np.concatenate((vertices, normals, diffuse * 255), axis = -1)
+    vertices_s = np.core.records.fromarrays(arr.transpose(), names = names, formats = formats)
+
+    # Recreate the PlyElement instance
+    v = PlyElement.describe(vertices_s, 'vertex')
+
+    # Create the PlyData instance
+    p = PlyData([ v ], text = True)
+
+    p.write(filename)
+
+
+def get_grid(size):
+    x = torch.arange(size)
+    a, b = torch.meshgrid(x, x)
+
+    return torch.stack([ a.flatten(), b.flatten() ], dim = -1)
+
+
 def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position_fn, encode_direction_fn, device):
 
     # Mesh Extraction
     samples_dimen_y = 8
-    samples_dimen_x = 1
+    samples_dimen_x = 4
     plane_near = 0
     plane_far = 4.0
+    img_size = 800
+    step_size = 2
+    dist_threshold = 0.002
+    prob_threshold = 0.6
 
     # Data
     vertices, triangles, normals, diffuse = [], [], [], []
@@ -58,12 +83,13 @@ def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position
         [
             torch.from_numpy(pose_spherical(angleY, angleX, plane_far)).float()
             for angleY in np.linspace(-180, 180, samples_dimen_y, endpoint = False)
-            for angleX in np.linspace(-60, -30, samples_dimen_x, endpoint = True)
+            for angleX in np.linspace(-90, 90, samples_dimen_x, endpoint = True)
         ], dim = 0
     )
 
-    hwf = [ 800.0, 800.0, 1111.1111 ]
+    hwf = [ img_size, img_size, 1111.1111 ]
 
+    grid = get_grid(img_size)
     for i, pose in enumerate(tqdm(render_poses)):
         pose = pose[:3, :4].to(device)
 
@@ -85,13 +111,34 @@ def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position
                 encode_direction_fn=encode_direction_fn,
             )
 
-            mask = (depth_fine > 0)
+            # Apply nn mask
+            surface_points = ray_origins + ray_directions * depth_fine[..., None]
+
+            acc = []
+            initial_values = surface_points[grid.T[0], grid.T[1]].view(img_size, img_size, -1)
+            size = step_size * 2 + 1
+            size_samples = size ** 2 - 1
+            for a in range(-step_size, step_size + 1):
+                for b in range(-step_size, step_size + 1):
+                    offset = torch.tensor([ a, b ])
+
+                    new_grid = grid + offset
+                    new_grid = new_grid.clamp(0, img_size - 1)
+
+                    new_grid = surface_points[new_grid.T[0], new_grid.T[1]].view(img_size, img_size, -1)
+                    new_grid_s = ((new_grid - initial_values) ** 2).sum(-1) < dist_threshold
+
+                    acc.append(new_grid_s)
+
+            new_mask = torch.stack(acc, -1).sum(-1).squeeze(-1) > size_samples * prob_threshold
+
+            dep_mask = (depth_fine > 0)
+            mask = new_mask * dep_mask
 
             ray_origins, ray_directions, depth_fine = ray_origins[mask], ray_directions[mask], depth_fine[mask]
             rgb_fine = rgb_fine[mask]
 
-            depth_fine = depth_fine[..., None]
-            surface_points = ray_origins + ray_directions * depth_fine
+            surface_points = ray_origins + ray_directions * depth_fine[..., None]
 
             vertices.append(surface_points.view(-1, 3).cpu().detach())
             normals.append((-ray_directions).view(-1, 3).cpu().detach())
@@ -102,10 +149,9 @@ def export_ray_trace(model_coarse, model_fine, config_args, cfg, encode_position
     vertices_fine = torch.cat(vertices, dim = 0).numpy()
     normals_fine = torch.cat(normals, dim = 0).numpy()
 
-    print(normals_fine.shape)
-
     # Export model
-    export_obj(vertices_fine, [], diffuse_fine, normals_fine, "lego-sampling.obj")
+    # export_obj(vertices_fine, [], diffuse_fine, normals_fine, "lego-sampling.obj")
+    export_ply(vertices_fine, diffuse_fine, normals_fine, "lego-sampling.ply")
 
 
 def main():
