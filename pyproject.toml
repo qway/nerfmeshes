@@ -21,6 +21,8 @@ pycollada = "^0.7.1"
 scipy = "^1.4.1"
 scikit-image = "^0.17.2"
 OpenEXR = "^1.3.2"
+pandas = "^1.1.0"
+tabulate = "^0.8.7"
 
 [tool.poetry.dev-dependencies]
 

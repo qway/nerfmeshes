@@ -206,7 +206,7 @@ def main():
         with torch.no_grad():
             pose = pose[:3, :4]
             ray_origins, ray_directions = get_ray_bundle(hwf[0], hwf[1], hwf[2], pose)
-            rgb_coarse, disp_coarse, _, depth_coarse, rgb_fine, disp_fine, _, depth_fine = run_one_iter_of_nerf(
+            rgb_coarse, z_vals, weights, depth_coarse, rgb_fine, disp_fine, _, depth_fine, radiance = run_one_iter_of_nerf(
                 hwf[0],
                 hwf[1],
                 hwf[2],
@@ -222,8 +222,10 @@ def main():
 
             rgb = rgb_fine if rgb_fine is not None else rgb_coarse
             if configargs.save_disparity_image:
-                disp = disp_fine if disp_fine is not None else disp_coarse
+                pass
+                # disp = disp_fine if disp_fine is not None else disp_coarse
 
+        print(rgb_coarse.shape)
         coarse_loss = torch.nn.functional.mse_loss(
             rgb_coarse[..., :3], img_target[..., :3]
         )
@@ -235,22 +237,24 @@ def main():
             )
 
         coarse_depth_loss = torch.nn.functional.mse_loss(depth_coarse, dep_target)
-        fine_depth_loss = torch.nn.functional.mse_loss(depth_fine, dep_target)
+        fine_depth_loss = torch.tensor(0.)
+        if depth_fine is not None:
+            fine_depth_loss = torch.nn.functional.mse_loss(depth_fine, dep_target)
 
         print(f"Loss MSE image {i}: Coarse Loss: {coarse_loss} / Fine Loss: {fine_loss}")
         print(f"Loss PSNR image {i}: Coarse PSNR: {mse2psnr(coarse_loss.item())} / Fine PSNR: {mse2psnr(fine_loss.item())}")
         print(f"Loss Depth image {i}: Coarse Depth: {coarse_depth_loss} / Fine Depth: {fine_depth_loss}")
 
-        export_point_cloud_sample(i, ray_origins, ray_directions, depth_fine, dep_target)
+        depth_target = depth_coarse if depth_fine is None else depth_fine
+        export_point_cloud_sample(i, ray_origins, ray_directions, depth_target, dep_target)
 
         times_per_image.append(time.time() - start)
         if configargs.save_dir:
-
             savefile = os.path.join(configargs.save_dir, f"{i:04d} depth_target.png")
             imageio.imwrite(savefile, cast_to_disparity_image(dep_target))
 
             savefile = os.path.join(configargs.save_dir, f"{i:04d} depth_output.png")
-            imageio.imwrite(savefile, cast_to_disparity_image(depth_fine))
+            imageio.imwrite(savefile, cast_to_disparity_image(depth_target))
 
             savefile = os.path.join(configargs.save_dir, f"{i:04d}.png")
             imageio.imwrite(
@@ -268,8 +272,9 @@ def main():
 
         tqdm.write(f"Avg time per image: {sum(times_per_image) / (i + 1)}")
 
-        # if (i + 1) % 5 == 0:
-        #     exit(-1)
+        if (i + 1) % 5 == 0:
+            print(i)
+            exit(-1)
 
 
 if __name__ == "__main__":

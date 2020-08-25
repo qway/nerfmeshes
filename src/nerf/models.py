@@ -235,6 +235,7 @@ class FlexibleNeRFModel(torch.nn.Module):
             xyz, view = x[..., : self.dim_xyz], x[..., self.dim_xyz :]
         else:
             xyz = x[..., : self.dim_xyz]
+
         x = self.layer1(xyz)
         for i in range(len(self.layers_xyz)):
             if (

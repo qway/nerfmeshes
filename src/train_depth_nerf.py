@@ -3,7 +3,8 @@ import glob
 import os
 import time
 import imageio
-
+import pandas as pd
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
 import torchvision
@@ -13,7 +14,7 @@ from tqdm import tqdm, trange
 
 from nerf import (CfgNode, get_embedding_function, get_ray_bundle, img2mse,
                   load_blender_data, load_llff_data, meshgrid_xy, models,
-                  mse2psnr)
+                  mse2psnr, TreeSampling, create_scene)
 
 # from nerf import (run_one_iter_of_nerf)
 from nerf.var import (run_one_iter_of_nerf)
@@ -32,6 +33,12 @@ def main():
         type=str,
         default="",
         help="Path to load saved checkpoint from.",
+    )
+    parser.add_argument(
+        "--message",
+        type=str,
+        default="",
+        help="Human readable message about the model.",
     )
 
     configargs = parser.parse_args()
@@ -58,6 +65,7 @@ def main():
         images, poses, depth_data, render_poses, (H, W, focal), i_split = load_blender_data(
             cfg.dataset.basedir,
             categories=["test_high_res", "val"],
+            empty=cfg.dataset.empty
         )
         i_train, i_val = i_split
 
@@ -98,15 +106,6 @@ def main():
     model_coarse.to(device)
     # If a fine-resolution model is specified, initialize it.
     model_fine = None
-    if hasattr(cfg.models, "fine"):
-        model_fine = getattr(models, cfg.models.fine.type)(
-            num_encoding_fn_xyz=cfg.models.fine.num_encoding_fn_xyz,
-            num_encoding_fn_dir=cfg.models.fine.num_encoding_fn_dir,
-            include_input_xyz=cfg.models.fine.include_input_xyz,
-            include_input_dir=cfg.models.fine.include_input_dir,
-            use_viewdirs=cfg.models.fine.use_viewdirs,
-        )
-        model_fine.to(device)
 
     # Initialize optimizer.
     trainable_parameters = list(model_coarse.parameters())
@@ -151,11 +150,31 @@ def main():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_iter = checkpoint["iter"]
 
+    # configuration to the writer
+    params_dict = {}
+    def rec_insert(cfg, prefixes = []):
+        for key in cfg:
+            tokens = prefixes + [ key ]
+            if isinstance(cfg[key], dict):
+                rec_insert(cfg[key], tokens)
+            else:
+                params_dict[".".join(tokens)] = str(cfg[key])
+
+    # insert dict to tensorboard
+    rec_insert(cfg)
+
+    data_frame = pd.DataFrame(params_dict.items(), columns = [ "Param", "Value" ])
+    writer.add_text("parameters", data_frame.to_markdown())
+    writer.add_text("description", configargs.message)
+
+    # Create a tree for sampling
+    tree = TreeSampling(cfg, device)
+
     # TODO: Prepare raybatch tensor if batching random rays
     for i in trange(start_iter, cfg.experiment.train_iters):
 
         model_coarse.train()
-        if model_fine:
+        if model_fine is not None:
             model_fine.train()
 
         # using the test set instead of train
@@ -186,7 +205,7 @@ def main():
         depth_data_s = depth_data_target[select_inds[:, 0], select_inds[:, 1]]
 
         then = time.time()
-        rgb_coarse, depth_coarse, rgb_fine, depth_fine = run_one_iter_of_nerf(
+        rgb_coarse, depth_coarse, rgb_fine, depth_fine, psdf_coarse, z_vals_coarse = run_one_iter_of_nerf(
             H,
             W,
             focal,
@@ -200,6 +219,7 @@ def main():
             encode_direction_fn=encode_direction_fn,
             depth_data = depth_data_s,
             it = i,
+            tree = tree,
         )
 
         target_ray_values = target_s
@@ -207,6 +227,11 @@ def main():
         # rgb loss
         coarse_loss = torch.nn.functional.mse_loss(
             rgb_coarse[..., :3], target_ray_values[..., :3]
+        )
+
+        mask = depth_data_s != cfg.dataset.empty
+        coarse_space_loss = torch.nn.functional.mse_loss(
+            rgb_coarse[..., :3][mask], target_ray_values[..., :3][mask]
         )
 
         fine_loss = torch.tensor(0)
@@ -217,28 +242,16 @@ def main():
 
         # depth loss
         coarse_depth_loss, fine_depth_loss = torch.tensor(0), torch.tensor(0)
-        coarse_depth_empty, coarse_depth_space = torch.tensor(0), torch.tensor(0)
-        mask = depth_data_s > 0
+        coarse_depth_empty, coarse_depth_space, coarse_l1 = torch.tensor(0), torch.tensor(0), torch.tensor(0)
+        fine_depth_empty, fine_depth_space, fine_l1 = torch.tensor(0), torch.tensor(0), torch.tensor(0)
         if depth_data is not None:
-            coarse_depth_loss = torch.nn.functional.mse_loss(
-                depth_coarse, depth_data_s
-            )
-
-            coarse_depth_empty = torch.nn.functional.mse_loss(
-                depth_coarse[~mask], depth_data_s[~mask]
-            )
-
-            coarse_depth_space = torch.nn.functional.mse_loss(
-                depth_coarse[mask], depth_data_s[mask]
-            )
+            coarse_depth_loss, coarse_depth_empty, coarse_depth_space, coarse_l1 = comp_depth(depth_coarse, depth_data_s, cfg)
 
             if depth_fine is not None:
-                fine_depth_loss = torch.nn.functional.mse_loss(
-                    depth_fine, depth_data_s
-                )
+                fine_depth_loss, fine_depth_empty, fine_depth_space, fine_l1 = comp_depth(depth_fine, depth_data_s, cfg)
 
-        loss = coarse_loss + fine_loss + fine_depth_loss * min(1e-2, 1e-4 * (i // 100))
-        psnr = mse2psnr(fine_loss.item())
+        loss = coarse_loss
+        psnr = mse2psnr(coarse_loss.item())
 
         loss.backward()
         optimizer.step()
@@ -253,38 +266,85 @@ def main():
         for param_group in optimizer.param_groups:
             param_group["lr"] = lr_new
 
+        def format(tensor):
+            return '{:.7f}'.format(tensor.item())
+
         if i % cfg.experiment.print_every == 0 or i == cfg.experiment.train_iters - 1:
             tqdm.write(
                 "[TRAIN] Iter: "
                 + str(i)
                 + " Loss: "
-                + str(loss.item())
+                + format(loss)
                 + " Coarse: "
-                + str(coarse_loss.item())
+                + format(coarse_loss)
                 + " CD: "
-                + str(coarse_depth_loss.item())
+                + format(coarse_depth_loss)
                 + " CDE: "
-                + str(coarse_depth_empty.item())
+                + format(coarse_depth_empty)
                 + " CDS: "
-                + str(coarse_depth_space.item())
+                + format(coarse_depth_space)
                 + " Fine: "
-                + str(fine_loss.item())
+                + format(fine_loss)
                 + " FD: "
-                + str(fine_depth_loss.item())
+                + format(fine_depth_loss)
+                + " FDE: "
+                + format(fine_depth_empty)
+                + " FDS: "
+                + format(fine_depth_space)
+                + " LC1: "
+                + format(coarse_l1)
+                + " LF1: "
+                + format(fine_l1)
                 + " PSNR: "
                 + str(psnr)
             )
 
-        if i % 500 == 0:
-            vertices, colors, _ = get_point_cloud_sample(ray_origins, ray_directions, depth_fine, depth_data_s)
+        def create_plot(sample, output, title):
+            fig = plt.figure(figsize = (15, 10))
+            plt.plot(sample, output)
+
+            writer.add_figure(title, fig, global_step = i // step_size_fig, close = True)
+
+        step_size_fig = 1000
+        if i % step_size_fig == 0 and i > 0:
+            space_s, space_s_output = z_vals_coarse[mask][0], psdf_coarse[mask][0]
+            space_e, space_e_output = z_vals_coarse[~mask][0], psdf_coarse[~mask][0]
+
+            create_plot(space_s.cpu().detach().numpy(), space_s_output.cpu().detach().numpy(), "Density Space")
+            create_plot(space_e.cpu().detach().numpy(), space_e_output.cpu().detach().numpy(), "Density Empty")
+
+        step_size_mesh = 500
+        if i % step_size_mesh == 0 and i > 0:
+            depth_target = depth_coarse
+            vertices, colors, _ = get_point_cloud_sample(ray_origins, ray_directions, depth_target, depth_data_s)
 
             vertices = vertices.unsqueeze(0)
-            colors = colors.unsqueeze(0).clamp(0., 1.0)
+            colors = colors.unsqueeze(0)
 
-            writer.add_mesh('train/point_cloud', vertices = vertices, colors = colors, global_step = i // 500)
+            point_size_config = {
+                'material': {
+                    'cls': 'PointsMaterial',
+                    'size': 0.03
+                }
+            }
+
+            writer.add_mesh('train/point_cloud', vertices = vertices, colors = colors, global_step = i // step_size_mesh, config_dict = point_size_config)
+
+        step_size_tree = cfg.tree.step_size_tree
+        if i % step_size_tree == 0 and i > 0:
+            tree.consolidate(split = True)
+            print(f"Tree was subdivided")
+
+        if i % step_size_tree == 0 and tree is not None:
+            vertices, faces, colors = create_scene([ tree.flatten() ])
+            writer.add_mesh('tree', vertices = vertices.unsqueeze(0), colors = colors.unsqueeze(0),
+                            faces = faces.unsqueeze(0),
+                            global_step = i // step_size_tree)
 
         writer.add_scalar("train/loss", loss.item(), i)
         writer.add_scalar("train/coarse_loss", coarse_loss.item(), i)
+        writer.add_scalar("train/coarse_space_loss", coarse_depth_space.item(), i)
+        writer.add_scalar("train/coarse_empty_loss", coarse_depth_empty.item(), i)
         if rgb_fine is not None:
             writer.add_scalar("train/fine_loss", fine_loss.item(), i)
 
@@ -296,10 +356,10 @@ def main():
         writer.add_scalar("train/psnr", psnr, i)
 
         # Validation
-        if i >= 10000:
+        if (i % 20000) == 0 and i > 0:
             tqdm.write("  [VAL] =======> Iter: " + str(i))
             model_coarse.eval()
-            if model_fine:
+            if model_fine is not None:
                 model_coarse.eval()
 
             start = time.time()
@@ -313,7 +373,7 @@ def main():
                     H, W, focal, pose_target
                 )
 
-                rgb_coarse, _, rgb_fine, _, = run_one_iter_of_nerf(
+                rgb_coarse, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
                     H,
                     W,
                     focal,
@@ -325,6 +385,7 @@ def main():
                     mode="validation",
                     encode_position_fn=encode_position_fn,
                     encode_direction_fn=encode_direction_fn,
+                    tree = tree
                 )
                 target_ray_values = img_target
 
@@ -336,9 +397,8 @@ def main():
                 else:
                     loss = coarse_loss
 
-                loss = coarse_loss
-                psnr = mse2psnr(coarse_loss.item())
-                writer.add_scalar("validation/loss", coarse_loss.item(), i)
+                psnr = mse2psnr(loss.item())
+                writer.add_scalar("validation/loss", loss.item(), i)
                 writer.add_scalar("validation/coarse_loss", coarse_loss.item(), i)
                 writer.add_scalar("validation/psnr", psnr, i)
                 writer.add_image(
@@ -374,6 +434,7 @@ def main():
                 "optimizer_state_dict": optimizer.state_dict(),
                 "loss": loss,
                 "psnr": psnr,
+                "tree": tree.voxels
             }
             torch.save(
                 checkpoint_dict,
@@ -381,6 +442,7 @@ def main():
             )
             tqdm.write("================== Saved Checkpoint =================")
 
+        if i > 200000:
             exit(-1)
 
     print("Done!")
@@ -429,17 +491,40 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
     print('Finished writing to obj')
 
 
-def get_point_cloud_sample(ray_origins, ray_directions, depth_fine, dep_target):
-    vertices_output = (ray_origins + ray_directions * depth_fine[..., None]).view(-1, 3)
+def get_point_cloud_sample(ray_origins, ray_directions, depth_output, dep_target):
+    mask = dep_target > 0
+    vertices_output_empty = (ray_origins[~mask] + ray_directions[~mask] * depth_output[~mask][..., None]).view(-1, 3)
+    vertices_output_space = (ray_origins[mask] + ray_directions[mask] * depth_output[mask][..., None]).view(-1, 3)
     vertices_target = (ray_origins + ray_directions * dep_target[..., None]).view(-1, 3)
-    vertices = torch.cat((vertices_output, vertices_target), dim = 0)
-    diffuse_output = torch.zeros_like(vertices_output).int()
-    diffuse_output[:, 0] = 255
-    diffuse_target = torch.zeros_like(vertices_target).int()
-    diffuse_target[:, 2] = 255
-    diffuse = torch.cat((diffuse_output, diffuse_target), dim = 0)
+    vertices = torch.cat((vertices_output_empty, vertices_output_space, vertices_target), dim = 0)
+    diffuse_output_empty = torch.zeros_like(vertices_output_empty)
+    diffuse_output_empty[:, 1] = 255.
+    diffuse_output_space = torch.zeros_like(vertices_output_space)
+    diffuse_output_space[:, 0] = 255.
+    diffuse_target = torch.zeros_like(vertices_target)
+    diffuse_target[:, 2] = 255.
+    diffuse = torch.cat((diffuse_output_empty, diffuse_output_space, diffuse_target), dim = 0)
     normals = torch.cat((-ray_directions.view(-1, 3), -ray_directions.view(-1, 3)), dim = 0)
     return vertices, diffuse, normals
+
+
+def comp_depth(depth_output, depth_target, options):
+    mask = depth_target > options.dataset.empty
+    depth_loss = torch.nn.functional.mse_loss(
+        depth_output, depth_target
+    )
+
+    depth_empty = torch.nn.functional.mse_loss(
+        depth_output[~mask], depth_target[~mask]
+    )
+
+    depth_space = torch.nn.functional.mse_loss(
+        depth_output[mask], depth_target[mask]
+    )
+
+    depth_l1 = (depth_output[mask] - depth_target[mask]).mean()
+
+    return depth_loss, depth_empty, depth_space, depth_l1
 
 
 if __name__ == "__main__":

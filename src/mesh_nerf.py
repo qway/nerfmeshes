@@ -99,28 +99,6 @@ def main():
         cfg_dict = yaml.load(f, Loader = yaml.FullLoader)
         cfg = CfgNode(cfg_dict)
 
-    images, poses, render_poses, hwf = None, None, None, None
-    i_train, i_val, i_test = None, None, None
-    if cfg.dataset.type.lower() == "blender":
-        # Load blender dataset
-        images, poses, _, render_poses, hwf, i_split = load_blender_data(
-            config_args.base_dir if config_args.base_dir is not None else cfg.dataset.basedir,
-            half_res = cfg.dataset.half_res,
-            testskip = cfg.dataset.testskip,
-        )
-        i_train, i_val, i_test = i_split
-        H, W, focal = hwf
-        H, W = int(H), int(W)
-    elif cfg.dataset.type.lower() == "llff":
-        # Load LLFF dataset
-        images, poses, bds, render_poses, i_test = load_llff_data(
-            config_args.base_dir if config_args.base_dir is not None else cfg.dataset.basedir, factor = cfg.dataset.downsample_factor,
-        )
-        hwf = poses[0, :3, -1]
-        H, W, focal = hwf
-        hwf = [int(H), int(W), focal]
-        render_poses = torch.from_numpy(render_poses)
-
     # Device on which to run.
     device = "cpu"
     if torch.cuda.is_available():
@@ -172,31 +150,24 @@ def main():
                 "The checkpoint has a fine-level model, but it could "
                 "not be loaded (possibly due to a mismatched config file."
             )
-    if "height" in checkpoint.keys():
-        hwf[0] = checkpoint["height"]
-    if "width" in checkpoint.keys():
-        hwf[1] = checkpoint["width"]
-    if "focal_length" in checkpoint.keys():
-        hwf[2] = checkpoint["focal_length"]
 
     model_coarse.eval()
     if model_fine:
         model_fine.eval()
 
     # Mesh Extraction
-    N = 256
+    N = 480
     iso_value = config_args.iso_level
     batch_size = 1024
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
     distance_length = 0.001
     distance_threshold = 0.001
-    view_disparity = 0.2
+    view_disparity = 1e-3
     limit = 1.2
     length = 4
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
-    adjust_normals = False
     specific_view = False
     adjust_normals = False
     plane_near = 0
@@ -230,7 +201,6 @@ def main():
         grid_alpha = density.reshape((N, N, N))
         print(f"Max density: {grid_alpha.max()}, Min density {grid_alpha.min()}, Mean density {grid_alpha.mean()}")
         print(f"Querying based on iso level: {iso_value}")
-        # iso_value = grid_alpha.min() * 0.6 + grid_alpha.max() * 0.4
 
         # Extracting iso-surface triangulated
         vertices, triangles, normals, values = measure.marching_cubes(grid_alpha, iso_value)
@@ -343,7 +313,7 @@ def main():
         view_dirs = ray_directions / ray_directions.norm(p = 2, dim = -1).unsqueeze(-1)
         rays = torch.cat((rays, view_dirs.view((-1, 3))), dim = -1)
 
-    ray_batches = get_minibatches(rays, chunksize = 2048)
+    ray_batches = get_minibatches(rays, chunksize = batch_size)
 
     pred = []
     for ray_batch in tqdm(ray_batches):

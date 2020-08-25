@@ -48,10 +48,12 @@ def predict_and_render_radiance(
         dtype=ro.dtype,
         device=ro.device,
     )
+
     if not getattr(options.nerf, mode).lindisp:
         z_vals = near * (1.0 - t_vals) + far * t_vals
     else:
         z_vals = 1.0 / (1.0 / near * (1.0 - t_vals) + 1.0 / far * t_vals)
+
     z_vals = z_vals.expand([num_rays, getattr(options.nerf, mode).num_coarse])
 
     if getattr(options.nerf, mode).perturb:
@@ -62,6 +64,7 @@ def predict_and_render_radiance(
         # Stratified samples in those intervals.
         t_rand = torch.rand(z_vals.shape, dtype=ro.dtype, device=ro.device)
         z_vals = lower + (upper - lower) * t_rand
+
     # pts -> (num_rays, N_samples, 3)
     pts = ro[..., None, :] + rd[..., None, :] * z_vals[..., :, None]
 
@@ -88,10 +91,8 @@ def predict_and_render_radiance(
         white_background=getattr(options.nerf, mode).white_background,
     )
 
-    rgb_fine, disp_fine, acc_fine = None, None, None
+    rgb_fine, disp_fine, acc_fine, depth_fine = None, None, None, None
     if getattr(options.nerf, mode).num_fine > 0:
-        # rgb_map_0, disp_map_0, acc_map_0 = rgb_map, disp_map, acc_map
-
         z_vals_mid = 0.5 * (z_vals[..., 1:] + z_vals[..., :-1])
         z_samples = sample_pdf(
             z_vals_mid,
@@ -99,7 +100,7 @@ def predict_and_render_radiance(
             getattr(options.nerf, mode).num_fine,
             det=(getattr(options.nerf, mode).perturb == 0.0),
         )
-        # z_samples = z_samples.detach()
+        z_samples = z_samples.detach()
 
         z_vals, _ = torch.sort(torch.cat((z_vals, z_samples), dim=-1), dim=-1)
 
@@ -124,7 +125,7 @@ def predict_and_render_radiance(
             white_background=getattr(options.nerf, mode).white_background,
         )
 
-    return rgb_coarse, disp_coarse, acc_coarse, depth_coarse, rgb_fine, disp_fine, acc_fine, depth_map_fine
+    return rgb_coarse, None, None, depth_coarse, rgb_fine, None, None, depth_fine
 
 
 def run_one_iter_of_nerf(
@@ -147,6 +148,7 @@ def run_one_iter_of_nerf(
         viewdirs = ray_directions
         viewdirs = viewdirs / viewdirs.norm(p=2, dim=-1).unsqueeze(-1)
         viewdirs = viewdirs.view((-1, 3))
+
     # Cache shapes now, for later restoration.
     restore_shapes = [
         ray_directions.shape,
@@ -154,8 +156,10 @@ def run_one_iter_of_nerf(
         ray_directions.shape[:-1],
         ray_directions.shape[:-1],
     ]
+
     if model_fine:
         restore_shapes += restore_shapes
+
     if options.dataset.no_ndc is False:
         ro, rd = ndc_rays(height, width, focal_length, 1.0, ray_origins, ray_directions)
         ro = ro.view((-1, 3))
@@ -186,19 +190,20 @@ def run_one_iter_of_nerf(
         torch.cat(image, dim=0) if image[0] is not None else (None)
         for image in synthesized_images
     ]
+
     if mode == "validation":
-        synthesized_images = [
-            image.view(shape) if image is not None else None
-            for (image, shape) in zip(synthesized_images, restore_shapes)
-        ]
+        synthesized_images_target = []
+        for (image, shape) in zip(synthesized_images, restore_shapes):
+            im = image.view(shape) if image is not None else None
+            synthesized_images_target.append(im)
 
         # Returns rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
         # (assuming both the coarse and fine networks are used).
         if model_fine:
-            return tuple(synthesized_images)
+            return tuple(synthesized_images_target)
         else:
             # If the fine network is not used, rgb_fine, disp_fine, acc_fine are
             # set to None.
-            return tuple(synthesized_images + [None, None, None])
+            return tuple(synthesized_images_target + [None, None, None])
 
     return tuple(synthesized_images)
