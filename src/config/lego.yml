@@ -9,7 +9,7 @@ experiment:
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 100
+  validate_every: 20000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -26,7 +26,11 @@ tree:
   # Max tree depth, higher requires more memory
   max_depth: 4
   # Threshold weight for pruning
-  eps: 0.2
+  eps: 0.005
+  # Max tree voxels
+  max_voxel_count: 2048
+  # Step size before ticking ray batch integration (early steps, the scene is unresolved)
+  step_size_integration_offset: 4000
   # Step size consolidation
   step_size_tree: 8000
 
@@ -54,6 +58,7 @@ dataset:
   # Depth empty space plane.
   empty: 0.
 
+
 # Model parameters.
 models:
   # Coarse model.
@@ -61,13 +66,13 @@ models:
     # Name of the torch.nn.Module class that implements the model.
     type: FlexibleNeRFModel
     # Number of layers in the model.
-    num_layers: 8
+    num_layers: 4
     # Number of hidden units in each layer of the MLP (multi-layer
     # perceptron).
-    hidden_size: 256
+    hidden_size: 128
     # Add a skip connection once in a while. Note: This parameter
     # won't take affect unless num_layers > skip_connect_every.
-    skip_connect_every: 3
+    skip_connect_every: 4
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -148,7 +153,7 @@ nerf:
     num_random_rays: 4096  # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
-    chunksize: 16384  # 131072  # 1024 * 32
+    chunksize: 4096  # 131072  # 1024 * 32
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
@@ -166,7 +171,7 @@ nerf:
   validation:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    chunksize: 16384   # 1024 * 32
+    chunksize: 4096   # 1024 * 32
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.

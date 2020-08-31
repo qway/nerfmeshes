@@ -1,9 +1,4 @@
 import torch
-import math
-import time
-from typing import Optional
-
-import torch
 
 
 class Node:
@@ -77,10 +72,10 @@ class TreeSampling:
         self.config = config
         self.device = device
 
-        # initial bounds
-        near, far = self.config.dataset.near, self.config.dataset.far
-        mean = (near + far) / 2
-        bounds = torch.tensor([near - mean] * 3), torch.tensor([far - mean] * 3)
+        # initial bounds, normalized
+        self.ray_near, self.ray_far = self.config.dataset.near, self.config.dataset.far
+        self.ray_mean = (self.ray_near + self.ray_far) / 2
+        bounds = torch.tensor([self.ray_near - self.ray_mean] * 3), torch.tensor([self.ray_far - self.ray_mean] * 3)
 
         # tree root
         self.root = Node(self.config, bounds, 0)
@@ -91,7 +86,7 @@ class TreeSampling:
         self.memm = None
         self.counter = 1
 
-        # intialize
+        # initialize
         self.consolidate()
 
     def flatten(self):
@@ -119,20 +114,34 @@ class TreeSampling:
 
     def consolidate(self, split = False):
         if self.memm is not None:
-            print(f"Min mem {self.memm.min()}")
-            print(f"Max mem {self.memm.max()}")
+            print(f"Min memm {self.memm.min()}")
+            print(f"Max memm {self.memm.max()}")
+            print(f"Mean memm {self.memm.mean()}")
+            print(f"Median memm {self.memm.median()}")
+            print(f"Threshold {self.config.tree.eps}")
 
+            # Filtering
             voxels_indices = torch.arange(self.memm.shape[0])
             mask_voxels = self.memm > self.config.tree.eps
-            print(f"Filtered mem {(~mask_voxels).sum()}")
             mask_voxels_list = voxels_indices[mask_voxels].tolist()
-            print(f"Current voxels count {len(mask_voxels_list)}")
+
+            voxel_count_initial = voxels_indices.shape[0]
+            voxel_count_filtered = (~mask_voxels).sum()
+            voxel_count_current = len(mask_voxels_list)
+            print(
+                f"From {voxel_count_initial} voxels with {voxel_count_filtered} filtered to current {voxel_count_current}")
+
+            # Nodes closer to the root have higher priority
+            voxels_filtered = [self.root.children[index] for index in mask_voxels_list]
+            voxels_filtered = sorted(voxels_filtered, key = lambda node: node.depth)
+
+            inner_size = self.config.tree.subdivision_inner_count ** 3 - 1
 
             children = []
-            for index in mask_voxels_list:
-                child = self.root.children[index]
-
-                if split:
+            for index, child in enumerate(voxels_filtered):
+                # Check if exceeds max cap
+                exp_voxel_count = len(children) + inner_size + voxel_count_current - index
+                if exp_voxel_count < self.config.tree.max_voxel_count:
                     child.subdivide()
                     if len(child.children) > 0:
                         children += child.children
@@ -141,40 +150,53 @@ class TreeSampling:
                 else:
                     children.append(child)
 
+            print(f"Now {len(children)} voxels")
             self.root.children = children
 
-        self.voxels = [ torch.stack(node.bounds, 0) for node in self.root.children ]
+        self.voxels = [torch.stack(node.bounds, 0) for node in self.root.children]
         self.voxels = torch.stack(self.voxels, 0).to(self.device)
         self.memm = torch.zeros(self.voxels.shape[0], ).to(self.device)
         self.counter = 1
 
-    def ray_batch_integration(self, ray_voxel_indices, ray_batch_weights):
+    def ray_batch_integration(self, step, ray_voxel_indices, ray_batch_weights, ray_batch_weights_mask):
         """ Performs ray batch integration into the nodes by weight accumulation
         Args:
+            step (int): Training step.
             ray_voxel_indices (torch.Tensor): Tensor (RxN) batch ray voxel indices.
             ray_batch_weights (torch.Tensor): Tensor (RxN) batch ray sample weights.
+            ray_batch_weights_mask (torch.Tensor): Tensor (RxN) batch ray sample weights mask.
         """
+        if step < self.config.tree.step_size_integration_offset:
+            return
+        elif step == self.config.tree.step_size_integration_offset:
+            print(f"Began ray batch integration... Step:{step}")
+
         voxel_count = self.voxels.shape[0]
         ray_count, ray_samples_count = ray_batch_weights.shape
 
         # accumulate weights
         acc = torch.zeros(ray_count, voxel_count, device = self.device)
-        acc = acc.scatter_add(1, ray_voxel_indices, ray_batch_weights)
+        acc = acc.scatter_add(-1, ray_voxel_indices, ray_batch_weights)
+        acc = acc.sum(0)
+
+        # freq weights
+        freq = torch.zeros(ray_count, voxel_count, device = self.device)
+        freq = freq.scatter_add(-1, ray_voxel_indices, ray_batch_weights_mask)
+        freq = freq.sum(0)
+        mask = freq > 0
 
         # distribute weights (voxel/accumulations) while being numerically stable
-        memm_sample = acc.sum(0)
-        self.memm = self.memm + (memm_sample - self.memm) / self.counter
-        self.memm = torch.clamp(self.memm, -1e12, 1e12)
+        self.memm[mask] = self.memm[mask] + (acc[mask] / freq[mask] - self.memm[mask]) / self.counter
         self.counter += 1
 
     def extract_(self, bounds, signs):
         out = bounds[signs]
         out = out.transpose(1, 2)
-        out = torch.stack((out[:, :, 0, 0], out[:, :, 1, 1], out[:, :, 2, 2]), -1)
+        out = out[:, :, [0, 1, 2], [0, 1, 2]]
 
         return out[:, :, None, :]
 
-    def batch_ray_voxel_intersect(self, bounds, origins, dirs, samples = 64):
+    def batch_ray_voxel_intersect(self, bounds, origins, dirs, samples = 64, verbose = False):
         """ Returns batch of min and max intersections with their indices.
         Args:
             bounds (torch.Tensor): Tensor (Nx2x3) whose elements define the min/max bounds.
@@ -222,27 +244,40 @@ class TreeSampling:
         mask_maxz = tvmax[..., 2] < tvmax[..., 0]
         tvmax[..., 0][mask_maxz] = tvmax[mask_maxz][..., 2]
 
-        # find intersection scalars
+        # find intersection scalars within range [ near, far ]
         intersections = torch.stack((tvmin[..., 0], tvmax[..., 0]), -1)
-        intersections[~mask] = 0
 
         # mask outliers
-        ray_mask = (intersections.sum(-1) != 0).sum(-1) > 0
+        mask = mask & ((intersections[..., 0] >= self.ray_near) | (intersections[..., 1] <= self.ray_far))
+        ray_mask = mask.sum(-1) > 0
+
         intersections = intersections[ray_mask]
 
+        # apply small weight for non-intersections
         weights = torch.ones((rays_count, voxels_count,), device = bounds.device)
         weights[~mask] = 1e-9
+        weights = weights[ray_mask]
 
-        samples = torch.multinomial(weights[ray_mask], samples, replacement = True)
+        # see this https://github.com/pytorch/pytorch/issues/43768
+        ray_rel = ray_mask.sum()
+        if ray_rel == 0:
+            indices = torch.ones(0, samples, device = bounds.device)
+
+            return torch.rand_like(indices), indices.long(), intersections, ray_mask
+
+        # sample intersections
+        samples = torch.multinomial(weights, samples, replacement = True)
         samples_indices = samples[..., None].expand(-1, -1, 2)
+
+        # clamp expected samples and gather intersection samples
+        intersections = intersections.clamp(self.ray_near, self.ray_far)
         values = intersections.gather(-2, samples_indices)
 
-        ray_rel = ray_mask.sum()
-        indices = torch.arange(voxels_count, device = bounds.device).repeat(ray_rel, 1).gather(-1, samples)
-
-        z_vals = values[..., 0] + (values[..., 1] - values[..., 0]) * torch.rand_like(values[..., 0],                                                                                      device = bounds.device)
+        # sample
+        z_vals = values[..., 0] + (values[..., 1] - values[..., 0]) * torch.rand_like(values[..., 0], device = bounds.device)
         z_vals, indices_ordered = z_vals.sort(-1)
 
+        indices = torch.arange(voxels_count, device = bounds.device).repeat(ray_rel, 1).gather(-1, samples)
         indices = indices.gather(-1, indices_ordered)
 
         return z_vals, indices, intersections, ray_mask

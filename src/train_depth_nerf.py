@@ -17,7 +17,7 @@ from nerf import (CfgNode, get_embedding_function, get_ray_bundle, img2mse,
                   mse2psnr, TreeSampling, create_scene)
 
 # from nerf import (run_one_iter_of_nerf)
-from nerf.var import (run_one_iter_of_nerf)
+from nerf.exp import (run_one_iter_of_nerf)
 
 
 def main():
@@ -97,6 +97,8 @@ def main():
 
     # Initialize a coarse-resolution model.
     model_coarse = getattr(models, cfg.models.coarse.type)(
+        num_layers = cfg.models.coarse.num_layers,
+        hidden_size = cfg.models.coarse.hidden_size,
         num_encoding_fn_xyz=cfg.models.coarse.num_encoding_fn_xyz,
         num_encoding_fn_dir=cfg.models.coarse.num_encoding_fn_dir,
         include_input_xyz=cfg.models.coarse.include_input_xyz,
@@ -171,6 +173,15 @@ def main():
     tree = TreeSampling(cfg, device)
 
     # TODO: Prepare raybatch tensor if batching random rays
+    # generates 2x by copying the arange output across consecutive dimensions, reverse the values when stacking
+    coords = torch.stack(
+        meshgrid_xy(torch.arange(H).to(device), torch.arange(W).to(device)),
+        dim = -1,
+    )
+
+    # create a list of H * W indices in form of (width, height), H * W * 2
+    coords = coords.reshape((-1, 2))
+
     for i in trange(start_iter, cfg.experiment.train_iters):
 
         model_coarse.train()
@@ -186,25 +197,16 @@ def main():
         # generate training data
         ray_origins, ray_directions = get_ray_bundle(H, W, focal, pose_target)
 
-        # generates 2x by copying the arange output across consecutive dimensions, reverse the values when stacking
-        coords = torch.stack(
-            meshgrid_xy(torch.arange(H).to(device), torch.arange(W).to(device)),
-            dim=-1,
-        )
-
-        # create a list of H * W indices in form of (width, height), H * W * 2
-        coords = coords.reshape((-1, 2))
         select_inds = np.random.choice(
             coords.shape[0], size=(cfg.nerf.train.num_random_rays), replace=False
         )
+
         select_inds = coords[select_inds]
         ray_origins = ray_origins[select_inds[:, 0], select_inds[:, 1], :]
         ray_directions = ray_directions[select_inds[:, 0], select_inds[:, 1], :]
-        # batch_rays = torch.stack([ray_origins, ray_directions], dim=0)
         target_s = img_target[select_inds[:, 0], select_inds[:, 1], :]
         depth_data_s = depth_data_target[select_inds[:, 0], select_inds[:, 1]]
 
-        then = time.time()
         rgb_coarse, depth_coarse, rgb_fine, depth_fine, psdf_coarse, z_vals_coarse = run_one_iter_of_nerf(
             H,
             W,
@@ -220,6 +222,7 @@ def main():
             depth_data = depth_data_s,
             it = i,
             tree = tree,
+            device=device
         )
 
         target_ray_values = target_s
@@ -330,9 +333,15 @@ def main():
 
             writer.add_mesh('train/point_cloud', vertices = vertices, colors = colors, global_step = i // step_size_mesh, config_dict = point_size_config)
 
+        def plot_tree(title):
+            y = tree.memm.sort().values.cpu().detach().numpy()
+            x = torch.arange(0, y.shape[0]).cpu().detach().numpy()
+            create_plot(x, y, title)
+
         step_size_tree = cfg.tree.step_size_tree
         if i % step_size_tree == 0 and i > 0:
-            tree.consolidate(split = True)
+            plot_tree("Tree Memm")
+            tree.consolidate()
             print(f"Tree was subdivided")
 
         if i % step_size_tree == 0 and tree is not None:
@@ -356,19 +365,19 @@ def main():
         writer.add_scalar("train/psnr", psnr, i)
 
         # Validation
-        if (i % 20000) == 0 and i > 0:
+        if (i % cfg.experiment.validate_every) == 0 and i > 0:
             tqdm.write("  [VAL] =======> Iter: " + str(i))
             model_coarse.eval()
             if model_fine is not None:
-                model_coarse.eval()
+                model_fine.eval()
 
             start = time.time()
             with torch.no_grad():
                 rgb_coarse, rgb_fine = None, None
                 target_ray_values = None
                 img_idx = np.random.choice(i_val)
-                img_target = images[img_idx].to(device)
-                pose_target = poses[img_idx, :3, :4].to(device)
+                img_target = images[img_idx]
+                pose_target = poses[img_idx, :3, :4]
                 ray_origins, ray_directions = get_ray_bundle(
                     H, W, focal, pose_target
                 )
@@ -385,7 +394,8 @@ def main():
                     mode="validation",
                     encode_position_fn=encode_position_fn,
                     encode_direction_fn=encode_direction_fn,
-                    tree = tree
+                    tree = tree,
+                    device=device
                 )
                 target_ray_values = img_target
 

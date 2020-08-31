@@ -166,7 +166,7 @@ def main():
     gap_samples = 128
     distance_length = 0.001
     distance_threshold = 0.001
-    view_disparity = 1e-1
+    view_disparity = 1e-4
     limit = 1.2
     length = 4
     t = np.linspace(-limit, limit, N)
@@ -313,9 +313,6 @@ def main():
         tn_attenut = tn_samples * cumprod_exclusive(torch.relu(tn_samples))
         tn_discrip = (tn_attenut > 1e-13).sum(-1)
         tn_offset = tn_discrip[:, None].float() / gap_samples * gap
-        print(tn_discrip[:, None].float().max())
-        print((tn_offset > view_disparity).sum())
-        print(tn_offset.shape)
         view_disparity = torch.max(tn_offset, torch.ones((targets.shape[0], 1)) * view_disparity)
 
     # Ray origins
