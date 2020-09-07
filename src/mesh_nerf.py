@@ -1,33 +1,27 @@
 import argparse
 import os
-import time
 import numpy as np
 import torch
-import torchvision
 import yaml
 
-from pathlib import Path
-from skimage import measure
-from scipy.spatial import KDTree
-from tqdm import tqdm
 try:
     import marching_cubes as mcubes
 except:
     print("Error, justus' version of pymcubes not installed!")
     print("""
-Run the following commands(Note that its currently not possible to install through a package manager, since it depends on eigen):
-
-poetry shell
-cd ../additional_dependencies/PyMarchingCubes
-python setup.py install
+    Run the following commands(Note that its currently not possible to install through a package manager, since it depends on eigen):
+    
+    poetry shell
+    cd ../additional_dependencies/PyMarchingCubes
+    python setup.py install
 """)
-from nerf import (
-    CfgNode,
-    models,
-    get_embedding_function,
-    predict_and_render_radiance,
-)
-from train_nerf import NeRFModel, nest_dict
+
+from pathlib import Path
+from skimage import measure
+from scipy.spatial import KDTree
+from tqdm import tqdm
+from nerf import CfgNode
+from model_nerf import NeRFModel, nest_dict
 
 
 def export_obj(vertices, triangles, diffuse, normals, filename):
@@ -54,43 +48,42 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "folder", type=str, help="Path to Log Folder"
+        "folder", type = str, help = "Path to Log Folder"
     )
     parser.add_argument(
         "--limit",
-        type=float,
-        help="Limits in -xyz to xyz for mcubes.",
-        default=1.0
+        type = float,
+        help = "Limits in -xyz to xyz for mcubes.",
+        default = 1.0
     )
     parser.add_argument(
         "--res",
-        type=int,
-        help="Sampling resolution for mcubes.",
-        default=128
+        type = int,
+        help = "Sampling resolution for mcubes.",
+        default = 128
     )
     parser.add_argument(
         "--save-dir",
-        type=str,
-        help="Save mesh to this directory, if specified.",
-        default=".",
+        type = str,
+        help = "Save mesh to this directory, if specified.",
+        default = ".",
     )
     parser.add_argument(
         "--super-sampling",
-        type=int,
-        help="Add super sampling along the edges.",
-        default=0,
+        type = int,
+        help = "Add super sampling along the edges.",
+        default = 0,
     )
 
-    parser.add_argument("--cache-mesh", dest="cache_mesh", action="store_true")
-    parser.add_argument("--no-cache-mesh", dest="cache_mesh", action="store_false")
-    parser.set_defaults(cache_mesh=True)
-
+    parser.add_argument("--cache-mesh", dest = "cache_mesh", action = "store_true")
+    parser.add_argument("--no-cache-mesh", dest = "cache_mesh", action = "store_false")
+    parser.set_defaults(cache_mesh = True)
 
     args = parser.parse_args()
     log_folder = Path(args.folder)
     with (log_folder / "hparams.yaml").open() as f:
-        hparams = yaml.load(f, Loader=yaml.FullLoader)
-        cfg = CfgNode(nest_dict(hparams, sep="."))
+        hparams = yaml.load(f, Loader = yaml.FullLoader)
+        cfg = CfgNode(nest_dict(hparams, sep = "."))
 
     if torch.cuda.is_available():
         device = torch.cuda.current_device()
@@ -100,14 +93,14 @@ def main():
         checkpoint_path = next(log_folder.glob('**/*.ckpt'))
     except:
         raise FileNotFoundError("Could not find a .ckpt file in folder ", args.checkpoint)
-    model = NeRFModel.load_from_checkpoint(checkpoint_path, cfg=cfg)
+    model = NeRFModel.load_from_checkpoint(checkpoint_path, cfg = cfg)
     model.eval()
     model.to(device)
 
     # Mesh Extraction
     N = args.res
     iso_value = 17
-    batch_size = 160*8*8
+    batch_size = 160 * 8 * 8
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
     distance_length = 0.001
@@ -123,18 +116,22 @@ def main():
         if args.cache_mesh:
             print("Generating mesh geometry...")
             if args.super_sampling >= 1:
-                grid_alpha_x, pts_flat_x = sample_points((N+(N-1)*args.super_sampling, N, N), batch_size, device, model, limit)
-                grid_alpha_y, pts_flat_y = sample_points((N, N+(N-1)*args.super_sampling, N), batch_size, device, model, limit)
-                grid_alpha_z, pts_flat_z = sample_points((N, N, N+(N-1)*args.super_sampling), batch_size, device, model, limit)
+                grid_alpha_x, pts_flat_x = sample_points((N + (N - 1) * args.super_sampling, N, N), batch_size, device,
+                                                         model, limit)
+                grid_alpha_y, pts_flat_y = sample_points((N, N + (N - 1) * args.super_sampling, N), batch_size, device,
+                                                         model, limit)
+                grid_alpha_z, pts_flat_z = sample_points((N, N, N + (N - 1) * args.super_sampling), batch_size, device,
+                                                         model, limit)
                 if iso_value is None:
                     iso_value_x = np.maximum(grid_alpha_x, 0).mean()
                     iso_value_y = np.maximum(grid_alpha_x, 0).mean()
                     iso_value_z = np.maximum(grid_alpha_x, 0).mean()
                     iso_value = np.mean([iso_value_x, iso_value_y, iso_value_z])
                 print("Iso-Value:", iso_value)
-                vertices, triangles = mcubes.marching_cubes_super_sampling(grid_alpha_x, grid_alpha_y, grid_alpha_z, iso_value)
+                vertices, triangles = mcubes.marching_cubes_super_sampling(grid_alpha_x, grid_alpha_y, grid_alpha_z,
+                                                                           iso_value)
                 vertices = np.ascontiguousarray(vertices)
-                mcubes.export_obj(vertices,triangles, os.path.join(args.save_dir, "mesh.obj"))
+                mcubes.export_obj(vertices, triangles, os.path.join(args.save_dir, "mesh.obj"))
                 return
             else:
 
@@ -156,19 +153,19 @@ def main():
                                   limit, normals, pts_flat, sampling_method, vertices)
 
             np.save(
-                os.path.join(args.save_dir, args.save_dir+"mesh_cache.npy"),
+                os.path.join(args.save_dir, args.save_dir + "mesh_cache.npy"),
                 (vertices, triangles, normals),
             )
             print("Mesh geometry saved successfully")
         else:
             print("Loading mesh geometry...")
             vertices, triangles, normals = np.load(
-                os.path.join(args.save_dir, "mesh_cache.npy"), allow_pickle=True
+                os.path.join(args.save_dir, "mesh_cache.npy"), allow_pickle = True
             )
 
         print("Generating mesh texture...")
 
-        #targets = torch.from_numpy(vertices) / N * 2 * limit - limit
+        # targets = torch.from_numpy(vertices) / N * 2 * limit - limit
         targets = torch.from_numpy(vertices)
 
         inv_normals = -torch.from_numpy(normals)
@@ -186,7 +183,7 @@ def main():
                 normal_batch = inv_normals[offset1:offset2].to(device)
 
                 result_batch = model.sample_points(pos_batch, normal_batch)
-                #result_batch = model.sample_points(pos_batch, None)
+                # result_batch = model.sample_points(pos_batch, None)
 
                 # Current color hack since the network does not normalize colors
                 result_batch = torch.nn.functional.sigmoid(result_batch[..., :3]) * 255
@@ -200,9 +197,9 @@ def main():
 
             # Careful, do not set the near plane to zero!
             ray_bounds = (
-                torch.tensor([0.001, 2 * view_disparity], dtype=ray_origins.dtype)
-                .view(1, 2)
-                .expand(batch_size, 2)
+                torch.tensor([0.001, 2 * view_disparity], dtype = ray_origins.dtype)
+                    .view(1, 2)
+                    .expand(batch_size, 2)
             ).to(device)
 
             pred = []
@@ -215,18 +212,17 @@ def main():
 
                 _, _, _, diffuse, _, _ = model((pos_batch, normal_batch, ray_bounds_batch))
 
-
                 pred.append(diffuse.cpu().detach())
 
             # Query the whole diffuse map
-            diffuse = torch.cat(pred, dim=0).numpy()
+            diffuse = torch.cat(pred, dim = 0).numpy()
 
     # If diffuse should be normalized
-    #diff_range = diffuse.max() -diffuse.min()
-    #diffuse = (diffuse - diffuse.min()) /diff_range * 255
+    # diff_range = diffuse.max() -diffuse.min()
+    # diffuse = (diffuse - diffuse.min()) /diff_range * 255
 
     # Export model
-    print("Saving final model...", end="")
+    print("Saving final model...", end = "")
     export_obj(
         vertices,
         triangles,
@@ -305,17 +301,17 @@ def adjusting_normals(N, chunk, density_samples_count, distance_length, limit, n
             normals[index] *= -1
 
 
-def sample_points(N, batch_size, device, model, limit, color=False):
+def sample_points(N, batch_size, device, model, limit, color = False):
     if isinstance(N, tuple):
-        x,y,z = N
+        x, y, z = N
         t_x = np.linspace(-limit, limit, x)
         t_y = np.linspace(-limit, limit, y)
         t_z = np.linspace(-limit, limit, z)
-        query_pts = np.stack(np.meshgrid(t_y,t_x,t_z), -1).astype(np.float32)
+        query_pts = np.stack(np.meshgrid(t_y, t_x, t_z), -1).astype(np.float32)
     else:
-        x,y,z = N,N,N
+        x, y, z = N, N, N
         t = np.linspace(-limit, limit, N)
-        query_pts = np.stack(np.meshgrid(t,t,t), -1).astype(np.float32)
+        query_pts = np.stack(np.meshgrid(t, t, t), -1).astype(np.float32)
     pts = torch.from_numpy(query_pts)
     dimension = pts.shape[-1]
     pts_flat = pts.reshape((-1, dimension))
@@ -341,7 +337,7 @@ def sample_points(N, batch_size, device, model, limit, color=False):
 
     grid_alpha = density.reshape((x, y, z))
     if color:
-        grid_color = colors.reshape((x,y,z,3))
+        grid_color = colors.reshape((x, y, z, 3))
         return grid_alpha, grid_color, pts_flat
     return grid_alpha, pts_flat
 

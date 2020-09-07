@@ -7,33 +7,33 @@ import torch
 import numpy as np
 
 
-def load_blender_data(data_config, reduced_resolution=None, start=0, stop=-1):
+def load_blender_data(data_config, reduced_resolution = None):
     """
-
     Args:
         data_config: Path to the config of the dataset.
         reduced_resolution: Provides an option to divide the resolution by a number.
-        start: First image to load.
-        stop: Last image to load.
 
     Returns:
         imgs: The images.
         poses: Camera poses associated with the images.
         [H, W, focal]: The camera parameters.
-
     """
     json_path = Path(data_config)
     basedir = json_path.parent
+
+    print(f"Reading from ${json_path}")
     with json_path.open("r") as fp:
         metadata = json.load(fp)
 
     imgs = []
     poses = []
 
-    for frame in metadata["frames"][start:stop]:
+    print(len(metadata["frames"]))
+    for frame in metadata["frames"]:
         fname = basedir / (frame["file_path"] + ".png")
         imgs.append(imageio.imread(fname))
         poses.append(np.array(frame["transform_matrix"]))
+
     imgs = (np.array(imgs) / 255.0).astype(np.float32)
     poses = np.array(poses).astype(np.float32)
 
@@ -47,7 +47,7 @@ def load_blender_data(data_config, reduced_resolution=None, start=0, stop=-1):
         focal = focal / reduced_resolution
         imgs = [
             torch.from_numpy(
-                cv2.resize(imgs[i], dsize=(H, W), interpolation=cv2.INTER_AREA)
+                cv2.resize(imgs[i], dsize = (H, W), interpolation = cv2.INTER_AREA)
             )
             for i in range(imgs.shape[0])
         ]

@@ -1,44 +1,47 @@
 import argparse
 import os
-import time
-from pathlib import Path
-
 import imageio
 import numpy as np
 import torch
 import torchvision
 import yaml
+
+from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm, trange
 
-from data.datasets import BlenderImageDataset
+from data.datasets import BlenderDataset
 from nerf import CfgNode, RaySampleInterval, SamplePDF
-from train_nerf import NeRFModel, nest_dict, get_ray_batch
+from model_nerf import NeRFModel, nest_dict, get_ray_batch
+
 
 def mse2psnr(mse):
     # For numerical stability, avoid a zero mse loss.
     if mse == 0:
         mse = 1e-5
+
     return -10.0 * np.log10(mse)
 
 
-def cast_to_image(tensor, dataset_type):
+def cast_to_image(tensor):
     # Input tensor is (H, W, 3). Convert to (3, H, W).
     tensor = tensor.permute(2, 0, 1)
+
     # Convert to PIL Image and then np.array (output shape: (H, W, 3))
     img = np.array(torchvision.transforms.ToPILImage()(tensor.detach().cpu()))
+
     return img
-    # # Map back to shape (3, H, W), as tensorboard needs channels first.
-    # return np.moveaxis(img, [-1], [0])
 
 
 def cast_to_disparity_image(tensor):
     img = (tensor - tensor.min()) / (tensor.max() - tensor.min())
     img = img.clamp(0, 1) * 255
+
     return img.detach().cpu().numpy().astype(np.uint8)
 
 
 def main():
+    torch.set_printoptions(threshold = 100, edgeitems = 50, precision = 8, sci_mode = False)
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -75,8 +78,7 @@ def main():
     model.eval()
     model.to(device)
 
-
-    test_dataset = BlenderImageDataset(
+    test_dataset = BlenderDataset(
         Path(cfg.dataset.basedir) / "transforms_test.json",
         cfg.dataset.near,
         cfg.dataset.far,
@@ -84,8 +86,8 @@ def main():
         white_background=cfg.nerf.train.white_background,
         #stop=5,  # Debug by only loading a small part of the dataset
     )
-    test_dataloader = DataLoader(test_dataset, batch_size=None)
 
+    test_dataloader = DataLoader(test_dataset, batch_size=None)
 
     # Create directory to save images to.
     if args.save:

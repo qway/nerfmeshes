@@ -1,11 +1,15 @@
+import os
 import math
-
 import cv2
 import imageio
-from pathlib import Path
 import numpy as np
-import json
+import glob
 import torch
+
+from abc import ABC, abstractmethod
+from tqdm import trange
+
+from pathlib import Path
 from torch.utils.data import Dataset
 
 from data.load_blender import load_blender_data
@@ -13,6 +17,7 @@ from data.load_colmap import read_model
 from data.load_llff import load_llff_data
 from data.load_scannet import SensorData
 from nerf import get_ray_bundle, meshgrid_xy
+from data import batch_random_sampling
 
 
 def dummy_rays_simple_radial(height: int, width: int, camera, resolution):
@@ -21,13 +26,15 @@ def dummy_rays_simple_radial(height: int, width: int, camera, resolution):
     cx *= resolution
     cy *= resolution
     ii, jj = meshgrid_xy(
-        torch.arange(width, dtype=torch.float32),
-        torch.arange(height, dtype=torch.float32),
+        torch.arange(width, dtype = torch.float32),
+        torch.arange(height, dtype = torch.float32),
     )
+
     directions = torch.stack(
-        [(ii - cx) / f, (jj - cy) / f, torch.ones_like(ii),], dim=-1,
+        [(ii - cx) / f, (jj - cy) / f, torch.ones_like(ii), ], dim = -1,
     )
-    #directions /= torch.norm(directions, dim=-1)[...,None]
+
+    # directions /= torch.norm(directions, dim=-1)[...,None]
     return directions
 
 
@@ -45,7 +52,7 @@ def convert_poses_to_rays(poses, H, W, focal):
     return all_ray_directions, all_ray_origins
 
 
-def get_rays(H, W, camera, poses, camera_model="SIMPLE_RADIAL", resolution=1.0):
+def get_rays(H, W, camera, poses, camera_model = "SIMPLE_RADIAL", resolution = 1.0):
     if camera_model == "SIMPLE_RADIAL":
         dummies = dummy_rays_simple_radial(H, W, camera, resolution)
     else:
@@ -54,7 +61,7 @@ def get_rays(H, W, camera, poses, camera_model="SIMPLE_RADIAL", resolution=1.0):
     all_ray_directions = []
     for pose in poses:
         ray_directions = torch.sum(dummies[..., None, :] * pose[:3, :3],
-                                   dim=-1).float()
+                                   dim = -1).float()
         ray_origins = (pose[:3, -1]).expand(ray_directions.shape).float()
 
         all_ray_origins.append(ray_origins)
@@ -63,141 +70,159 @@ def get_rays(H, W, camera, poses, camera_model="SIMPLE_RADIAL", resolution=1.0):
     all_ray_directions = torch.stack(all_ray_directions, 0)
     return all_ray_directions, all_ray_origins
 
-class BlenderRayDataset(Dataset):
+
+class CachingDataset(Dataset):
+
+    def __init__(self, cfg, type):
+        self.cfg, self.type = cfg, type
+        self.H, self.W, self.focal = None, None, None
+        self.ray_origins, self.ray_directions, self.ray_targets = None, None, None
+        self.num_random_rays = self.cfg.nerf.train.num_random_rays
+
+        # Device on which to run.
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        if self.cfg.dataset.caching.use_caching:
+            cache_dir = self.cfg.dataset.caching.cache_dir
+            if not os.path.exists(cache_dir) or self.cfg.dataset.caching.override_caching:
+                print(f"The path ${cache_dir} does not exist, creating one...")
+                self.cache_dataset()
+
+            self.paths = glob.glob(os.path.join(cache_dir, type, "*.data"))
+            self.init_sampling(torch.load(self.paths[0])['hwf'])
+        else:
+            self.load_dataset()
+
+    def __len__(self):
+        return len(self.paths) if self.cfg.dataset.caching.use_caching else self.ray_directions.shape[0]
+
+    def __getitem__(self, idx):
+        if self.cfg.dataset.caching.use_caching:
+            path = self.paths[idx]
+            cache_dict = torch.load(path)
+
+            ray_origins, ray_directions = cache_dict['ray_bundle']
+            ray_targets = cache_dict['target']
+        else:
+            ray_origins = self.ray_origins[idx]
+            ray_directions = self.ray_directions[idx]
+            ray_targets = self.ray_targets[idx]
+
+        # random sampling
+        if self.num_random_rays > -1:
+            return batch_random_sampling(self.cfg, self.coords, (ray_origins, ray_directions, ray_targets))
+
+        return ray_origins, ray_directions, ray_targets
+
+    def init_sampling(self, hwf):
+        self.H, self.W, self.focal = hwf
+
+        # Coordinates to sample from, list of H * W indices in form of (width, height), H * W * 2
+        self.coords = torch.stack(
+            meshgrid_xy(torch.arange(self.H), torch.arange(self.W)),
+            dim = -1,
+        ).reshape((-1, 2))
+
+    def save_dataset(self, hwf, ray_origins, ray_directions, target, img_idx, cfg, type, batch_idx = -1):
+        """
+            Script to run and cache a dataset for faster train-eval loops.
+        """
+        batch_rays = torch.stack([ray_origins, ray_directions], dim = 0)
+
+        cache_dict = {
+            "hwf": hwf,
+            "ray_bundle": batch_rays.detach().cpu(),
+            "target": target.detach().cpu(),
+        }
+
+        if batch_idx != -1:
+            path = str(img_idx).zfill(4) + str(batch_idx).zfill(4) + ".data"
+        else:
+            path = str(img_idx).zfill(4) + ".data"
+
+        save_path = os.path.join(cfg.dataset.caching.cache_dir, type, path)
+
+        torch.save(cache_dict, save_path)
+
+    @abstractmethod
+    def load_dataset(self):
+        pass
+
+    @abstractmethod
+    def cache_dataset(self):
+        pass
+
+
+class BlenderDataset(CachingDataset):
     """
-    A basic pytorch dataset for NeRF based on blender data. Note that it loads data
-    already in rays and as such the original pictures are not recoverable. Do not use if
-    you want to reconstruct images!
+        A basic PyTorch dataset for NeRF based on blender data. A single sample is equal
+        to a full picture, so some additional pre-processing might be needed.
     """
 
-    def __init__(
-        self,
-        config_path,
-        num_random_rays,
-        near,
-        far,
-        shuffle=False,
-        start=0,
-        stop=-1,
-        white_background=False,
-    ):
-        self.num_random_rays = num_random_rays
-        images, poses, hwf = load_blender_data(
-            config_path, reduced_resolution=None, start=start, stop=stop,
-        )
-        H, W, self.focal = hwf
-        self.H, self.W = int(H), int(W)
-        if white_background:
+    def __init__(self, cfg, type = "train"):
+        super(BlenderDataset, self).__init__(cfg, type)
+        print("Loading Blender Data...")
+
+    def load_dataset(self):
+        self.num_random_rays = self.cfg.nerf.train.num_random_rays
+        self.shuffle = True
+        self.dataset_path = Path(self.cfg.dataset.basedir) / f"transforms_{self.type}.json"
+        images, poses, hwf = load_blender_data(self.dataset_path, reduced_resolution = self.cfg.dataset.half_res)
+
+        if self.cfg.nerf.train.white_background:
             images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])
 
-        all_ray_directions, all_ray_origins = convert_poses_to_rays(
+        self.init_sampling(hwf)
+        self.ray_directions, self.ray_origins = convert_poses_to_rays(
             poses, self.H, self.W, self.focal
         )
+        self.ray_targets = torch.from_numpy(images)[..., :3]
 
-        # Linearize images, ray_origins, ray_directions
-        self.ray_targets = torch.from_numpy(images).view(-1, 4)
-        self.all_ray_origins = all_ray_origins.view(-1, 3)
-        self.all_ray_directions = all_ray_directions.view(-1, 3)
-        self.ray_bounds = (
-            torch.tensor([near, far], dtype=self.ray_targets.dtype)
-            .view(1, 2)
-            .expand(self.num_random_rays, 2)
-        )
-
-        if shuffle:
+        if self.shuffle:
             shuffled_indices = np.arange(self.ray_targets.shape[0])
             np.random.shuffle(shuffled_indices)
             self.ray_targets = self.ray_targets[shuffled_indices]
-            self.all_ray_directions = self.all_ray_directions[shuffled_indices]
-            self.all_ray_origins = self.all_ray_origins[shuffled_indices]
+            self.ray_directions = self.ray_directions[shuffled_indices]
+            self.ray_origins = self.ray_origins[shuffled_indices]
 
-    def __len__(self):
-        return int(self.ray_targets.shape[0] / self.num_random_rays)
+    def cache_dataset(self):
+        # testskip = args.blender_stride TODO(0)
+        images, poses, hwf = load_blender_data(self.dataset_path, reduced_resolution = self.cfg.dataset.half_res)
 
-    def __getitem__(self, idx):
-        start = idx * self.num_random_rays
-        indices = slice(start, start + self.num_random_rays)
-        # Select pose and image
-        ray_origin = self.all_ray_origins[indices]
-        ray_direction = self.all_ray_directions[indices]
-        ray_target = self.ray_targets[indices]
-        ray_bounds = self.ray_bounds
-        return (ray_origin, ray_direction, ray_bounds, ray_target)
+        # Create dataset directory
+        os.makedirs(os.path.join(self.cfg.dataset.caching.cache_dir, self.type), exist_ok = True)
 
+        # Coordinates to sample from
+        self.init_sampling(hwf)
 
-class BlenderImageDataset(Dataset):
-    """
-    A basic pytorch dataset for NeRF based on blender data. A single datapoint is equal
-    to a full picture, so some additonal preprocessing might be needed.
-    """
+        for img_idx in trange(images.shape[0]):
+            ray_targets = images[img_idx].to(self.device)
+            pose_target = poses[img_idx, :3, :4].to(self.device)
+            ray_origins, ray_directions = get_ray_bundle(*hwf, pose_target)
 
-    def __init__(
-        self,
-        config_path,
-        near,
-        far,
-        shuffle=False,
-        start=0,
-        stop=-1,
-        white_background=False,
-    ):
-        images, poses, hwf = load_blender_data(
-            config_path, reduced_resolution=None, start=start, stop=stop,
-        )
-        H, W, self.focal = hwf
-        self.H, self.W = int(H), int(W)
-        if white_background:
-            images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])
+            if self.cfg.dataset.caching.sample_all:
+                self.save_dataset(hwf, ray_origins, ray_directions, ray_targets, img_idx, self.cfg, self.type)
+            else:
+                for batch_idx in range(self.cfg.dataset.caching.num_variations):
+                    batch_rays = batch_random_sampling(self.cfg, self.coords, (ray_origins, ray_directions, ray_targets))
 
-        all_ray_directions, all_ray_origins = convert_poses_to_rays(
-            poses, self.H, self.W, self.focal
-        )
-
-        # Linearize images, ray_origins, ray_directions
-        total_images = images.shape[0]
-        self.ray_targets = torch.from_numpy(images).view(total_images, -1, 4)
-        self.all_ray_origins = all_ray_origins.view(total_images, -1, 3)
-        self.all_ray_directions = all_ray_directions.view(total_images, -1, 3)
-        self.ray_bounds = (
-            torch.tensor([near, far], dtype=self.ray_targets.dtype)
-            .view(1, 2)
-            .expand(self.ray_targets.shape[1], 2)
-        )
-
-        if shuffle:
-            shuffled_indices = np.arange(self.ray_targets.shape[0])
-            np.random.shuffle(shuffled_indices)
-            self.ray_targets = self.ray_targets[shuffled_indices]
-            self.all_ray_directions = self.all_ray_directions[shuffled_indices]
-            self.all_ray_origins = self.all_ray_origins[shuffled_indices]
-
-    def __len__(self):
-        return int(self.ray_targets.shape[0])
-
-    def __getitem__(self, idx):
-        ray_origin = self.all_ray_origins[idx]
-        ray_direction = self.all_ray_directions[idx]
-        ray_target = self.ray_targets[idx]
-        ray_bounds = self.ray_bounds
-        return (ray_origin, ray_direction, ray_bounds, ray_target)
+                    self.save_dataset(hwf, *batch_rays, img_idx, batch_idx, self.cfg, self.type)
 
 
 class ScanNetDataset(Dataset):
     def __init__(
-        self,
-        data,
-        num_random_rays=None,
-        near=2,
-        far=6,
-        start=0,
-        stop=-1,
-        skip=None,
-        skip_every=None,
-        resolution=1.0,
-        scale=1.0
+            self,
+            data,
+            num_random_rays = None,
+            near = 2,
+            far = 6,
+            start = 0,
+            stop = -1,
+            skip = None,
+            skip_every = None,
+            resolution = 1.0,
+            scale = 1.0
     ):
         """
-
         :param data: A loaded .sens file
         :param num_random_rays: Number of rays that should be in a batch. If None, a batch consists of the full image.
         :param near: Near plane for bounds.
@@ -224,24 +249,24 @@ class ScanNetDataset(Dataset):
             self.data_len = self.stop - math.ceil(self.stop / skip_every)
         else:
             self.data_len = len(data.frames)
-        self.H, self.W = int(self.data.color_height*resolution), int(self.data.color_width*resolution)
-        self.dummy_rays = dummy_rays_simple_radial( # TODO: Implement other camera models
+        self.H, self.W = int(self.data.color_height * resolution), int(self.data.color_width * resolution)
+        self.dummy_rays = dummy_rays_simple_radial(  # TODO: Implement other camera models
             self.H, self.W, self.data.intrinsic_color, self.resolution
         )
         if self.num_random_rays:
             self.pixels = torch.stack(
-                meshgrid_xy(torch.arange(self.H), torch.arange(self.W)), dim=-1,
+                meshgrid_xy(torch.arange(self.H), torch.arange(self.W)), dim = -1,
             ).reshape((-1, 2))
             self.ray_bounds = (
-                torch.tensor([near, far], dtype=torch.float32)
-                .view(1, 2)
-                .expand(self.num_random_rays, 2)
+                torch.tensor([near, far], dtype = torch.float32)
+                    .view(1, 2)
+                    .expand(self.num_random_rays, 2)
             )
         else:
             self.ray_bounds = (
-                torch.tensor([near, far], dtype=torch.float32)
-                .view(1, 2)
-                .expand(self.dummy_rays.shape[0] * self.dummy_rays.shape[1], 2)
+                torch.tensor([near, far], dtype = torch.float32)
+                    .view(1, 2)
+                    .expand(self.dummy_rays.shape[0] * self.dummy_rays.shape[1], 2)
             )
 
     def __len__(self):
@@ -252,26 +277,26 @@ class ScanNetDataset(Dataset):
         if self.skip:
             item *= self.skip
         if self.skip_every:
-            item += (item // self.skip_every-1) + 1
+            item += (item // self.skip_every - 1) + 1
         data_frame = self.data.frames[item]
         # Format image
         image = data_frame.decompress_color(self.data.color_compression_type)
         if self.resolution != 1.0:
-            image = cv2.resize(image, dsize=(self.H, self.W), interpolation=cv2.INTER_AREA)
-            image = np.transpose(image,(1,0,2))
+            image = cv2.resize(image, dsize = (self.H, self.W), interpolation = cv2.INTER_AREA)
+            image = np.transpose(image, (1, 0, 2))
         image = torch.from_numpy(image / 255.0).float()
-        image = torch.cat((image, torch.ones(self.H, self.W, 1, dtype=image.dtype)), dim=-1)
+        image = torch.cat((image, torch.ones(self.H, self.W, 1, dtype = image.dtype)), dim = -1)
 
         # Resolve ray directions and positions
         pose = torch.from_numpy(data_frame.camera_to_world)
-        ray_directions = torch.sum(self.dummy_rays[..., None, :] * pose[:3, :3], dim=-1).float()
-        ray_positions = (pose[:3, -1]*self.scale).expand(ray_directions.shape).float()
+        ray_directions = torch.sum(self.dummy_rays[..., None, :] * pose[:3, :3], dim = -1).float()
+        ray_positions = (pose[:3, -1] * self.scale).expand(ray_directions.shape).float()
 
         if self.num_random_rays:
 
             # Choose subset to sample
             pixel_idx = np.random.choice(
-                self.pixels.shape[0], size=(self.num_random_rays), replace=False
+                self.pixels.shape[0], size = (self.num_random_rays), replace = False
             )
             ray_idx = self.pixels[pixel_idx]
             return (
@@ -293,22 +318,22 @@ class ColmapDataset(Dataset):
     """
 
     def __init__(
-        self,
-        config_folder_path,
-        num_random_rays,
-        near,
-        far,
-        shuffle=False,
-        start=None,
-        stop=None,
-        downscale_factor=1.0
+            self,
+            config_folder_path,
+            num_random_rays,
+            near,
+            far,
+            shuffle = False,
+            start = None,
+            stop = None,
+            downscale_factor = 1.0
     ):
         super(ColmapDataset, self).__init__()
-        resolution = 1/downscale_factor
+        resolution = 1 / downscale_factor
         self.num_random_rays = num_random_rays
         if config_folder_path is not Path:
             config_folder_path = Path(config_folder_path)
-        cameras, images, points3D = read_model(path=config_folder_path / "sparse" / "0", ext=".bin")
+        cameras, images, points3D = read_model(path = config_folder_path / "sparse" / "0", ext = ".bin")
 
         list_of_keys = list(cameras.keys())
         cam = cameras[list_of_keys[0]]
@@ -335,13 +360,13 @@ class ColmapDataset(Dataset):
 
         imgs = (np.array(imgs) / 255.0).astype(np.float32)
 
-        if resolution!=1:
+        if resolution != 1:
             self.H = int(self.H * resolution)
             self.W = int(self.W * resolution)
             self.focal = self.focal * resolution
             imgs = [
                 torch.from_numpy(
-                    cv2.resize(img, dsize=(self.W, self.H), interpolation=cv2.INTER_AREA)
+                    cv2.resize(img, dsize = (self.W, self.H), interpolation = cv2.INTER_AREA)
                 )
                 for img in imgs
             ]
@@ -350,12 +375,11 @@ class ColmapDataset(Dataset):
             imgs = torch.from_numpy(imgs)
 
         if imgs.shape[-1] == 3:
-            imgs = torch.cat((imgs, torch.ones(*imgs.shape[:-1],1)), dim=-1)
+            imgs = torch.cat((imgs, torch.ones(*imgs.shape[:-1], 1)), dim = -1)
 
         all_ray_directions, all_ray_origins = get_rays(
             self.H, self.W, cam.params, poses, cam.model, resolution
         )
-
 
         if num_random_rays >= 0:
             # Linearize images, ray_origins, ray_directions
@@ -363,9 +387,9 @@ class ColmapDataset(Dataset):
             self.all_ray_origins = all_ray_origins.view(-1, 3).float()
             self.all_ray_directions = all_ray_directions.view(-1, 3).float()
             self.ray_bounds = (
-                torch.tensor([near, far], dtype=self.ray_targets.dtype)
-                .view(1, 2)
-                .expand(self.num_random_rays, 2).float()
+                torch.tensor([near, far], dtype = self.ray_targets.dtype)
+                    .view(1, 2)
+                    .expand(self.num_random_rays, 2).float()
             )
         else:
             total_images = imgs.shape[0]
@@ -373,7 +397,7 @@ class ColmapDataset(Dataset):
             self.all_ray_origins = all_ray_origins.view(total_images, -1, 3).float()
             self.all_ray_directions = all_ray_directions.view(total_images, -1, 3).float()
             self.ray_bounds = (
-                torch.tensor([near, far], dtype=self.ray_targets.dtype)
+                torch.tensor([near, far], dtype = self.ray_targets.dtype)
                     .view(1, 2)
                     .expand(self.ray_targets.shape[1], 2)
             ).float()
@@ -409,26 +433,25 @@ class ColmapDataset(Dataset):
 
 class LLFFColmapDataset(Dataset):
     def __init__(
-        self,
-        config_folder_path,
-        num_random_rays,
-        shuffle=True,
-        start=None,
-        stop=None,
-        downscale_factor=1,
-        spherify=True,
+            self,
+            config_folder_path,
+            num_random_rays,
+            shuffle = True,
+            start = None,
+            stop = None,
+            downscale_factor = 1,
+            spherify = True,
     ):
         super(LLFFColmapDataset, self).__init__()
         self.num_random_rays = num_random_rays
 
         images, poses, bds, render_poses, i_test = load_llff_data(
-            config_folder_path, factor=downscale_factor, spherify=spherify
+            config_folder_path, factor = downscale_factor, spherify = spherify
         )
         hwf = poses[0, :3, -1]
         images = images[start:stop]
         poses = poses[start:stop, :3, :4]
         bds = bds[start:stop]
-
 
         H, W, focal = hwf
         H, W = int(H), int(W)
@@ -444,11 +467,11 @@ class LLFFColmapDataset(Dataset):
         )
 
         if images.shape[-1] == 3:
-            images = torch.cat((images, torch.ones(*images.shape[:-1],1)), dim=-1)
+            images = torch.cat((images, torch.ones(*images.shape[:-1], 1)), dim = -1)
 
-        #bds[..., 0] -= 0.5
-        #bds[..., 1] += 0.5
-        ray_bounds = torch.from_numpy(bds)[:, None, None, :].expand(*images.shape[:-1],2)
+        # bds[..., 0] -= 0.5
+        # bds[..., 1] += 0.5
+        ray_bounds = torch.from_numpy(bds)[:, None, None, :].expand(*images.shape[:-1], 2)
 
         # Linearize images, ray_origins, ray_directions
         if num_random_rays >= 0:
@@ -462,7 +485,7 @@ class LLFFColmapDataset(Dataset):
             self.ray_targets = images.view(total_images, -1, 4).float()
             self.all_ray_origins = all_ray_origins.view(total_images, -1, 3).float()
             self.all_ray_directions = all_ray_directions.view(total_images, -1,
-                                                              3).float()
+                                                          3).float()
             self.ray_bounds = ray_bounds.view(total_images, -1, 2).float()
 
         if shuffle:
@@ -498,11 +521,14 @@ class LLFFColmapDataset(Dataset):
 def tensor_to_pcloud_point(x, c):
     return f"{x[0]};{x[1]};{x[2]};{c[0]};{c[1]};{c[2]}"
 
+
 def rays_to_pcloud_string(ray_origin, ray_direction, ray_bounds, ray_target):
     if ray_target.shape[0] == 1:
-        ray_origin, ray_direction, ray_bounds, ray_target = ray_origin[0], ray_direction[0], ray_bounds[0], ray_target[0]
-    rays = [tensor_to_pcloud_point(rorg + rdir, rtar) for rorg, rdir, rtar in zip(ray_origin, ray_direction, ray_target)]
-    rays += [tensor_to_pcloud_point(rorg, (0,0,0)) for rorg in ray_origin]
+        ray_origin, ray_direction, ray_bounds, ray_target = ray_origin[0], ray_direction[0], ray_bounds[0], ray_target[
+            0]
+    rays = [tensor_to_pcloud_point(rorg + rdir, rtar) for rorg, rdir, rtar in
+            zip(ray_origin, ray_direction, ray_target)]
+    rays += [tensor_to_pcloud_point(rorg, (0, 0, 0)) for rorg in ray_origin]
     return """
 """.join(rays)
 
@@ -511,15 +537,15 @@ def data_set_to_pcloud_string(dataset):
     return "\n".join([rays_to_pcloud_string(*data) for data in dataset])
 
 
-
 if __name__ == '__main__':
     # Tests for the ScanNet dataloader
     dataset = LLFFColmapDataset(
         "../../data/mountainbike/",
-        num_random_rays=1000,
-        #stop=10,  # Debug by loading only small part of the dataset
-        downscale_factor=32
+        num_random_rays = 1000,
+        # stop=10,  # Debug by loading only small part of the dataset
+        downscale_factor = 32
     )
+
     pcloud = data_set_to_pcloud_string(dataset)
 
     if dataset:
