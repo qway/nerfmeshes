@@ -9,7 +9,7 @@ experiment:
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 10000
+  validate_every: 200
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -39,10 +39,12 @@ dataset:
   near: 2
   # Far clip plane (clip all depth values farther than this threshold).
   far: 6
+  # Num workers.
+  num_workers: 4
   # Caching parameters (works only on Blender, LLFF).
   caching:
     # Use cached dataset, if it's not created, create one.
-    use_caching: False
+    use_caching: True
     # Override existing cached dataset when new changes are done to the dataset loader.
     override_caching: False
     # Overrides basedir path to the following pre-cached dataset dir.
@@ -62,12 +64,13 @@ models:
   # Coarse model.
   # Name of the torch.nn.Module class that implements the model.
   coarse_type: RotFlexibleNeRFModel
+  # Coarse model parameters.
   coarse:
     # Number of layers in the model.
     hidden_layers: 4
     # Add a skip connection once in a while.
-    skip_count: 2
-    # Position encoding .
+    skip_count: 4
+    # Position encoding.
     encoding: positional
     # Number of view dependent layers (-1 for no view dependence)
     hidden_layers_view: -1
@@ -96,11 +99,16 @@ models:
   # Fine model.
   # Name of the torch.nn.Module class that implements the model.
   fine_type: RotFlexibleNeRFModel
+  # Whether to use the final model.
+  use_fine: False
+  # Fine model parameters.
   fine:
     # Number of layers in the model.
-    hidden_layers: 8
-    skip_count: 3
-    encoding: fastrot
+    hidden_layers: 4
+    # Add a skip connection once in a while.
+    skip_count: 4
+    # Position encoding.
+    encoding: positional
     # Number of view dependent layers(-1 for no view dependence)
     hidden_layers_view: -1
     # Size of the hidden layers
@@ -113,7 +121,7 @@ models:
     log_sampling_xyz: True
     # Number of encoding functions to use in the positional encoding
     # of the coordinates.
-    num_encoding_fn_xyz: 192
+    num_encoding_fn_xyz: 10
     # Whether to include the direction itself in its positional encoding.
     include_input_dir: True
     # Number of encoding functions to use in the positional encoding of the direction.
@@ -152,10 +160,10 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 512 # 32 * 32 * 4
+    num_random_rays: 4096
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
-    chunksize: 2048  # 131072  # 1024 * 32
+    chunksize: 4096
     # Whether or not to perturb the sampled depth values.
     perturb: True
     # Number of depth samples per ray for the coarse network.
@@ -189,3 +197,5 @@ nerf:
     radiance_field_noise_std: 0.
     # Sample linearly in disparity space, as opposed to in depth space.
     lindisp: False
+    # Use smaller pool of random batch samples for faster validation epoch, use -1 if use the whole dataset.
+    num_samples: 1

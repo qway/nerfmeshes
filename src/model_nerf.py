@@ -6,6 +6,7 @@ import time
 import torch
 import torchvision
 import yaml
+import pytorch_lightning as pl
 
 from pathlib import Path
 from pytorch_lightning import Trainer, seed_everything
@@ -15,10 +16,11 @@ from pytorch_lightning.core.memory import ModelSummary
 from pytorch_lightning.loggers import TensorBoardLogger
 from torch.utils.data import DataLoader
 from typing import Tuple
-from data.datasets import BlenderDataset, ScanNetDataset, ColmapDataset, LLFFColmapDataset
+from data.datasets import BlenderDataset, ScanNetDataset, ColmapDataset, LLFFColmapDataset, DatasetType
 from data.load_scannet import SensorData
 from nerf import models, CfgNode, mse2psnr, VolumeRenderer, RaySampleInterval, \
     SamplePDF, DensityExtractor
+
 
 
 def flatten_dict(d, parent_key = "", sep = "_"):
@@ -47,12 +49,10 @@ def _nest_dict_rec(k, v, out, sep = "_"):
         out[k] = v
 
 
-def intervals_to_ray_points(point_intervals, ray_direction, ray_origin):
-    raypoints = (
-            ray_origin[..., None, :] + ray_direction[..., None, :] * point_intervals[..., :, None]
-    )
+def intervals_to_ray_points(point_intervals, ray_directions, ray_origin):
+    ray_points = ray_origin[..., None, :] + ray_directions[..., None, :] * point_intervals[..., :, None]
 
-    return raypoints
+    return ray_points
 
 
 def create_models(cfg) -> Tuple[torch.nn.Module, torch.nn.Module]:
@@ -61,7 +61,7 @@ def create_models(cfg) -> Tuple[torch.nn.Module, torch.nn.Module]:
 
     # If a fine-resolution model is specified, initialize it.
     model_fine = None
-    if hasattr(cfg.models, "fine"):
+    if hasattr(cfg.models, "fine") and cfg.models.use_fine:
         model_fine = getattr(models, cfg.models.fine_type)(**cfg.models.fine)
 
     return model_coarse, model_fine
@@ -96,10 +96,11 @@ class NeRFModel(LightningModule):
         else:
             self.cfg = cfg
             self.hparams = flatten_dict(cfg, sep = ".")
-        self.dataset_basepath = Path(cfg.dataset.basedir)
 
+        self.dataset_basepath = Path(cfg.dataset.basedir)
         self.loss = torch.nn.MSELoss()
 
+        self.train_dataset, self.val_dataset = None, None
         self.model_coarse, self.model_fine = create_models(cfg)
         self.volume_renderer = VolumeRenderer(
             cfg.nerf.train.radiance_field_noise_std,
@@ -111,6 +112,8 @@ class NeRFModel(LightningModule):
         self.sample_interval = RaySampleInterval(cfg, cfg.nerf.train.num_coarse, perturb = cfg.nerf.train.perturb)
         self.sample_pdf = SamplePDF(cfg.nerf.train.num_fine)
 
+        self.load_train_dataset()
+        self.load_val_dataset()
         if self.cfg.dataset.type == "scannet":
             self.sensor_data = None
 
@@ -131,6 +134,7 @@ class NeRFModel(LightningModule):
             nerf_cfg = self.cfg.nerf.validation
 
         ray_intervals = self.sample_interval(self.cfg.dataset.near, self.cfg.dataset.far)
+        ray_intervals = ray_intervals[:ray_directions.shape[0]]
         ray_points = intervals_to_ray_points(ray_intervals, ray_directions, ray_origins)
 
         # Expand rays to match batchsize
@@ -146,13 +150,13 @@ class NeRFModel(LightningModule):
         ) = self.volume_renderer(coarse_radiance_field, ray_intervals, ray_directions, )
 
         rgb_fine, disp_fine, acc_fine = None, None, None
-        if nerf_cfg.num_fine > 0 and self.model_fine:
+        if nerf_cfg.num_fine > 0 and self.model_fine is not None:
             fine_ray_intervals = self.sample_pdf(ray_intervals, weights, nerf_cfg.perturb)
             ray_points = intervals_to_ray_points(
                 fine_ray_intervals, ray_directions, ray_origins
             )
 
-            # Expand rays to match batchsize
+            # Expand rays to match batch_size
             expanded_ray_directions = ray_directions[..., None, :].expand_as(ray_points)
             fine_radiance_field = self.model_fine(ray_points, expanded_ray_directions)
 
@@ -160,6 +164,7 @@ class NeRFModel(LightningModule):
                 fine_radiance_field, fine_ray_intervals, ray_directions
             )
             return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
+
         return rgb_coarse, disp_coarse, acc_coarse, rgb_fine, disp_fine, acc_fine
 
     def sample_points(self, points, rays = None, **kwargs):
@@ -180,80 +185,69 @@ class NeRFModel(LightningModule):
         )
 
         coarse_loss = self.loss(rgb_coarse, ray_targets)
+        coarse_psnr = mse2psnr(coarse_loss)
 
+        loss = coarse_loss
         if rgb_fine is not None:
             fine_loss = self.loss(rgb_fine, ray_targets)
-            mse_loss = coarse_loss + fine_loss
-            loss = mse_loss
-            psnr = mse2psnr(fine_loss)
-        else:
-            fine_loss = None
-            mse_loss = coarse_loss
-            loss = coarse_loss
-            psnr = mse2psnr(coarse_loss)
+            fine_psnr = mse2psnr(fine_loss)
+
+            loss += fine_loss
 
         log_vals = {
-            "train/loss": loss.item(),
-            "train/coarse_loss": coarse_loss.item(),
-            "train/psnr": psnr.item(),
+            "train/loss": loss,
+            "train/coarse_loss": coarse_loss,
+            "train/coarse_psnr": coarse_psnr,
             "train/lr": self.trainer.optimizers[0].param_groups[0]['lr']
         }
 
         if rgb_fine is not None:
             log_vals = {
                 **log_vals,
-                "train/fine_loss": fine_loss.item(),
-                "train/mse_loss": mse_loss.item()
+                "train/fine_loss": fine_loss,
+                "train/fine_psnr": fine_psnr,
             }
 
-        output = {
+        return {
             "loss": loss,
-            "log": log_vals,
+            "log": log_vals
         }
 
-        return output
-
     def validation_step(self, image_ray_batch, batch_idx):
-        ray_origins, ray_directions, bounds, ray_targets = get_ray_batch(
-            image_ray_batch
-        )
+        ray_origins, ray_directions, ray_targets = get_ray_batch(image_ray_batch)
 
-        # Manual batching, since images can be bigger than memory allows
-        batchsize = self.cfg.nerf.validation.chunksize
-        batchcount = ray_origins.shape[0] / batchsize
+        # Manual batching, since images are very expensive in terms of GPU memory
+        batch_size = self.cfg.nerf.validation.chunksize
+        batch_count = ray_targets.shape[0] / batch_size
 
         coarse_loss = 0
         fine_loss = 0
         all_rgb_coarse = []
         all_rgb_fine = []
-        print("-------Validation Loop--------")
-        for i in range(0, ray_origins.shape[0], batchsize):
+        for i in range(0, ray_targets.shape[0], batch_size):
             rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
-                (
-                    ray_origins[i: i + batchsize],
-                    ray_directions[i: i + batchsize],
-                    bounds,
-                )
+                (ray_origins, ray_directions[i: i + batch_size])
             )
 
             all_rgb_coarse.append(rgb_coarse)
 
             coarse_loss += self.loss(
-                rgb_coarse[..., :3], ray_targets[i: i + batchsize, :3]
+                rgb_coarse[..., :3], ray_targets[i: i + batch_size, :3]
             )
 
-            if rgb_fine is not None:
+            if self.model_fine is not None:
                 fine_loss += self.loss(
-                    rgb_fine[..., :3], ray_targets[i: i + batchsize, :3]
+                    rgb_fine[..., :3], ray_targets[i: i + batch_size, :3]
                 )
+
                 all_rgb_fine.append(rgb_fine)
 
         rgb_coarse = torch.cat(all_rgb_coarse, 0)
 
-        coarse_loss /= batchcount
-        if rgb_fine is not None:
+        coarse_loss /= batch_count
+        if self.model_fine is not None:
             rgb_fine = torch.cat(all_rgb_fine, 0)
-            fine_loss /= batchcount
+            fine_loss /= batch_count
             loss = fine_loss + coarse_loss
         else:
             rgb_fine = None
@@ -268,6 +262,7 @@ class NeRFModel(LightningModule):
             ),
             self.global_step,
         )
+
         if rgb_fine is not None:
             self.logger.experiment.add_image(
                 "validation/rgb_fine/" + str(batch_idx),
@@ -276,6 +271,7 @@ class NeRFModel(LightningModule):
                 ),
                 self.global_step,
             )
+
         self.logger.experiment.add_image(
             "validation/img_target/" + str(batch_idx),
             cast_to_image(
@@ -286,30 +282,30 @@ class NeRFModel(LightningModule):
 
         output = {
             "val_loss": loss,
-            "validation/loss": loss,
-            "validation/coarse_loss": coarse_loss,
-            "validation/psnr": psnr,
+            "log": {
+                "validation/loss": loss,
+                "validation/coarse_loss": coarse_loss,
+                "validation/psnr": psnr
+            }
         }
 
-        if rgb_fine is not None:
-            output["validation/fine_loss"] = fine_loss
+        # if rgb_fine is not None:
+        #     output["validation/fine_loss"] = fine_loss
 
         return output
 
     def validation_epoch_end(self, outputs):
-        log_vals = {}
-        for k in outputs[0].keys():
-            log_vals[k] = torch.stack([x[k] for x in outputs]).mean()
-        val_loss_mean = log_vals["val_loss"]
-        del log_vals["val_loss"]
-        for k, v in log_vals.items():
-            log_vals[k] = v.item()
+        log_mean = { "log": {} }
+        for k in outputs[0]["log"].keys():
+            log_mean["log"][k] = torch.stack([ x["log"][k] for x in outputs ]).mean()
 
-        return {"val_loss": val_loss_mean, "log": log_vals}
+        log_mean['val_loss'] = torch.stack([x["val_loss"] for x in outputs]).mean()
 
-    def train_dataloader(self):
+        return log_mean
+
+    def load_train_dataset(self):
         if self.cfg.dataset.type == "blender":
-            self.train_dataset = BlenderDataset(self.cfg, type = "train")
+            self.train_dataset = BlenderDataset(self.cfg, type = DatasetType.TRAIN)
         elif self.cfg.dataset.type == "scannet":
             if not self.sensor_data:
                 self.sensor_data = SensorData(
@@ -333,13 +329,9 @@ class NeRFModel(LightningModule):
                 downscale_factor = self.cfg.dataset.downscale_factor
             )
 
-        train_dataloader = DataLoader(self.train_dataset, batch_size = 1, shuffle = True)
-
-        return train_dataloader
-
-    def val_dataloader(self):
+    def load_val_dataset(self):
         if self.cfg.dataset.type == "blender":
-            self.val_dataset = BlenderDataset(self.cfg, type = "val")
+            self.val_dataset = BlenderDataset(self.cfg, type = DatasetType.VALIDATION)
         elif self.cfg.dataset.type == "scannet":
             if not self.sensor_data:
                 self.sensor_data = SensorData(
@@ -361,7 +353,26 @@ class NeRFModel(LightningModule):
                 stop = 2,  # Debug by loading only small part of the dataset
                 downscale_factor = self.cfg.dataset.downscale_factor
             )
-        val_dataloader = DataLoader(self.val_dataset, batch_size = None)
+
+        self.val_num_samples = self.cfg.nerf.validation.num_samples
+        if self.val_num_samples != -1:
+            self.val_num_samples = max(min(len(self.val_dataset), self.val_num_samples), 1)
+
+    def train_dataloader(self):
+        train_dataloader = DataLoader(self.train_dataset, batch_size = 1, shuffle = False, num_workers = self.cfg.dataset.num_workers, pin_memory = False)
+
+        return train_dataloader
+
+    def val_dataloader(self):
+        # Use a smaller pool of random batch samples
+        sampler = None
+        if self.val_num_samples != -1:
+            # TODO(0) https://github.com/pytorch/pytorch/pull/39214
+            sampler = torch.utils.data.RandomSampler(self.val_dataset, replacement = True, num_samples = self.val_num_samples)
+
+        # Create data loader
+        val_dataloader = DataLoader(self.val_dataset, shuffle = False, batch_size = 1, sampler = sampler, num_workers = self.cfg.dataset.num_workers, pin_memory = False)
+
         return val_dataloader
 
     def configure_optimizers(self):
@@ -376,9 +387,7 @@ class NeRFModel(LightningModule):
         scheduler_dict = {
             'scheduler': scheduler,
             'interval': 'step',
-            'frequency': 1,
-            'reduce_on_plateau': False,
-            'monitor': 'loss'
+            'frequency': 1
         }
 
         return [optimizer], [scheduler_dict]

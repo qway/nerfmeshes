@@ -6,6 +6,7 @@ import torchvision
 import re
 import yaml
 import numpy as np
+import pytorch_lightning as pl
 
 from pathlib import Path
 from pytorch_lightning import Trainer, seed_everything
@@ -18,10 +19,10 @@ from lightning_modules import LoggerCallback
 from model_nerf import NeRFModel, nest_dict, get_ray_batch
 
 
-def load_config(configargs):
+def load_config(config_args):
     cfg = None
 
-    with open(configargs.config, "r") as f:
+    with open(config_args.config, "r") as f:
         cfg_dict = yaml.load(f, Loader = yaml.FullLoader)
         cfg = CfgNode(cfg_dict)
 
@@ -55,6 +56,7 @@ def create_intervals(
             point_intervals.shape, dtype = ray_origin.dtype, device = ray_origin.device
         )
         point_intervals = lower + (upper - lower) * t_rand
+
     return point_intervals
 
 
@@ -78,64 +80,62 @@ if __name__ == "__main__":
         help = "Path to load saved checkpoint from.",
     )
     parser.add_argument(
-        "--runname",
+        "--run-name",
         type = str,
-        default = None,
+        default = "default",
         help = "Name of the run should be appended to the date"
     )
 
-    configargs = parser.parse_args()
+    config_args = parser.parse_args()
 
     # Read config file.
-    cfg = load_config(configargs)
+    cfg = load_config(config_args)
 
     # # (Optional:) enable this to track autograd issues when debugging
     # torch.autograd.set_detect_anomaly(True)
     seed_everything(cfg.experiment.randomseed)
 
+    # Create model
     model = NeRFModel(cfg)
 
-    logdir = Path("../logs") / (cfg.experiment.id)
-    os.makedirs(logdir, exist_ok = True)
-    runname = str(time.strftime("%y-%m-%d-%H:%M-"))
-    if configargs.runname:
-        logger = TensorBoardLogger(logdir, "", runname + configargs.runname)
-    else:
-        logger = TensorBoardLogger(logdir, "", runname)
+    log_dir = Path("../logs") / cfg.experiment.id
+    os.makedirs(log_dir, exist_ok = True)
 
-    # with open(os.path.join(logdir, "config.yml"), "w") as f:
-    #   f.write(cfg.dump())  # cfg, f, default_flow_style=False)
-    checkpoint_callback = ModelCheckpoint(
-        filepath = str(logdir),
-        save_top_k = True,
-        verbose = True,
-        monitor = "val_loss",
-        mode = "min",
-        prefix = "",
-    )
+    log_name = str(time.strftime("%y-%m-%d-%H:%M-")) + config_args.run_name
+    logger = TensorBoardLogger(log_dir, log_name, default_hp_metric = False)
 
+    checkpoint_dir = Path(logger.log_dir) / "checkpoints"
+    os.makedirs(checkpoint_dir, exist_ok = True)
+
+    # Model checkpoint generator
+    checkpoint_callback = ModelCheckpoint(filepath = str(checkpoint_dir), save_top_k = 3, save_last = True, verbose = True,
+        monitor = "val_loss", mode = "min", prefix = "model")
+
+    # Trainer callbacks
     loggerCallback = LoggerCallback(cfg)
+
+    check_val_every_n_epoch = cfg.experiment.validate_every // len(model.train_dataset)
     trainer = Trainer(
         weights_summary = None,
-        gpus = configargs.gpus,
-        # val_check_interval = int(cfg.experiment.train_iters / cfg.experiment.validate_every),
-        check_val_every_n_epoch = cfg.experiment.validate_every / 100,
-        default_root_dir = str(logdir),
+        gpus = config_args.gpus,
+        check_val_every_n_epoch = check_val_every_n_epoch,
+        default_root_dir = str(log_dir),
         logger = logger,
-        nb_sanity_val_steps = 0,
-        # checkpoint_callback=checkpoint_callback,
+        num_sanity_val_steps = 0,
+        checkpoint_callback = checkpoint_callback,
+        row_log_interval = 1,
+        log_gpu_memory = None,
         # profiler=True, # Activate for very simple profiling
         # fast_dev_run=True, # Activate when debugging
-        max_epochs = int(cfg.experiment.train_iters / cfg.experiment.print_every),
-        min_epochs = int(cfg.experiment.train_iters / cfg.experiment.print_every),
-        log_gpu_memory = 'min_max',
+        max_steps = cfg.experiment.train_iters,
+        min_steps = cfg.experiment.train_iters,
         deterministic = True,
         progress_bar_refresh_rate = 0,
-        accumulate_grad_batches = cfg.nerf.train.chunksize // cfg.nerf.train.num_random_rays,
-        callbacks = [ loggerCallback ]
+        accumulate_grad_batches = 1,
+        callbacks = [loggerCallback]
     )
 
     logger.experiment.add_text("config", f"\t{cfg.dump()}".replace("\n", "\n\t"), 0)
-    # logger.experiment.add_text("params", f"\t{ModelSummary(model, trainer.weights_summary).__str__()}".replace("\n", "\n\t"), 0)
+    logger.experiment.add_text("params", f"\t{ModelSummary(model, mode = 'full')}".replace("\n", "\n\t"), 0)
 
     trainer.fit(model)

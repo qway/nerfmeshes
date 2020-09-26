@@ -34,7 +34,7 @@ def load_blender_data(data_config, reduced_resolution = None):
         imgs.append(imageio.imread(fname))
         poses.append(np.array(frame["transform_matrix"]))
 
-    imgs = (np.array(imgs) / 255.0).astype(np.float32)
+    imgs = (np.array(imgs) / 255.0).astype(np.float32)[..., :3]
     poses = np.array(poses).astype(np.float32)
 
     H, W = imgs[0].shape[:2]

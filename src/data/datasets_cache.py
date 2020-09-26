@@ -9,28 +9,6 @@ from data import load_blender_data, load_llff_data, batch_random_sampling
 from nerf import get_ray_bundle, meshgrid_xy
 
 
-def cache_dataset(hwf, ray_origins, ray_directions, target, img_idx, cfg, type, batch_idx = -1):
-    """
-        Script to run and cache a dataset for faster train-eval loops.
-    """
-    batch_rays = torch.stack([ray_origins, ray_directions], dim = 0)
-
-    cache_dict = {
-        "hwf": hwf,
-        "ray_bundle": batch_rays.detach().cpu(),
-        "target": target.detach().cpu(),
-    }
-
-    if batch_idx != -1:
-        path = str(img_idx).zfill(4) + str(batch_idx).zfill(4) + ".data"
-    else:
-        path = str(img_idx).zfill(4) + ".data"
-
-    save_path = os.path.join(cfg.dataset.caching.cache_dir, type, path)
-
-    torch.save(cache_dict, save_path)
-
-
 def cache_nerf_dataset(cfg):
     images, poses, hwf = None, None, None
 

@@ -14,6 +14,7 @@ def mse2psnr(mse):
     # For numerical stability, avoid a zero mse loss.
     if mse == 0:
         mse = 1e-5
+
     return -10.0 * torch.log10(mse)
 
 
@@ -112,8 +113,8 @@ def get_ray_bundle(
         directions_norm[..., None, :] * tform_cam2world[:3, :3], dim = -1
     )
 
-    # Ray origins (3,) => (W, H, 3)
-    ray_origins = tform_cam2world[:3, -1].expand(ray_directions.shape)
+    # Ray origins (3,) => (1, 3)
+    ray_origins = tform_cam2world[:3, -1]
 
     return ray_origins, ray_directions
 

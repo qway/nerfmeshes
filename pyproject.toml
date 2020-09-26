@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "cchiv-nerf"
+name = "NeRF-extension"
 version = "0.1.0"
 description = "A mesh reconstruction tool build around Neural Radiance Fields"
 authors = ["Cristian Chivrga <cchivriga@gmail.com>"]
@@ -21,7 +21,6 @@ pycollada = "^0.7.1"
 scipy = "^1.4.1"
 scikit-image = "^0.17.2"
 torchsearchsorted = {git = "https://github.com/aliutkus/torchsearchsorted" }
-pytorch-lightning = "^0.7.6"
 
 [tool.poetry.dev-dependencies]
 

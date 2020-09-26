@@ -5,10 +5,11 @@ import imageio
 import numpy as np
 import glob
 import torch
+import time
 
 from abc import ABC, abstractmethod
 from tqdm import trange
-
+from enum import Enum, auto
 from pathlib import Path
 from torch.utils.data import Dataset
 
@@ -18,6 +19,12 @@ from data.load_llff import load_llff_data
 from data.load_scannet import SensorData
 from nerf import get_ray_bundle, meshgrid_xy
 from data import batch_random_sampling
+
+
+class DatasetType(Enum):
+    TRAIN = "train"
+    TEST = "test"
+    VALIDATION = "val"
 
 
 def dummy_rays_simple_radial(height: int, width: int, camera, resolution):
@@ -47,8 +54,10 @@ def convert_poses_to_rays(poses, H, W, focal):
 
         all_ray_origins.append(ray_origins)
         all_ray_directions.append(ray_directions)
+
     all_ray_origins = torch.stack(all_ray_origins, 0)
     all_ray_directions = torch.stack(all_ray_directions, 0)
+
     return all_ray_directions, all_ray_origins
 
 
@@ -74,23 +83,45 @@ def get_rays(H, W, camera, poses, camera_model = "SIMPLE_RADIAL", resolution = 1
 class CachingDataset(Dataset):
 
     def __init__(self, cfg, type):
+        assert type in DatasetType.__members__.values(), f"Invalid dataset type {type} expected {list(DatasetType.__members__.keys())}"
+
         self.cfg, self.type = cfg, type
         self.H, self.W, self.focal = None, None, None
         self.ray_origins, self.ray_directions, self.ray_targets = None, None, None
         self.num_random_rays = self.cfg.nerf.train.num_random_rays
+        self.dataset_path = Path(self.cfg.dataset.basedir) / f"transforms_{self.type.value}.json"
+
+        # Cached dataset path
+        self.path = os.path.join(self.cfg.dataset.caching.cache_dir, self.type.value)
 
         # Device on which to run.
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        start_time = time.time()
         if self.cfg.dataset.caching.use_caching:
+            # Dataset path
             cache_dir = self.cfg.dataset.caching.cache_dir
-            if not os.path.exists(cache_dir) or self.cfg.dataset.caching.override_caching:
+            cache_dir_exists = os.path.exists(cache_dir)
+            if not cache_dir_exists:
                 print(f"The path ${cache_dir} does not exist, creating one...")
+
+                # Create dataset directory
+                os.makedirs(self.path, exist_ok = True)
+
+            message = "overriding" if self.cfg.dataset.caching.override_caching and cache_dir_exists else "creating"
+            print(f"Caching the dataset to {self.path} by {message}...")
+            if self.cfg.dataset.caching.override_caching or not cache_dir_exists:
                 self.cache_dataset()
 
-            self.paths = glob.glob(os.path.join(cache_dir, type, "*.data"))
+            self.paths = glob.glob(os.path.join(cache_dir, self.type.value, "*.data"))
             self.init_sampling(torch.load(self.paths[0])['hwf'])
         else:
             self.load_dataset()
+
+        time_last = time.time() - start_time
+        if self.cfg.dataset.caching.use_caching:
+            print(f"Using cached dataset in {time_last}s seconds...")
+        else:
+            print(f"Load whole dataset into the memory {time_last}s seconds...")
 
     def __len__(self):
         return len(self.paths) if self.cfg.dataset.caching.use_caching else self.ray_directions.shape[0]
@@ -100,16 +131,15 @@ class CachingDataset(Dataset):
             path = self.paths[idx]
             cache_dict = torch.load(path)
 
-            ray_origins, ray_directions = cache_dict['ray_bundle']
-            ray_targets = cache_dict['target']
+            ray_origins, ray_directions, ray_targets = cache_dict['ray_bundle']
         else:
             ray_origins = self.ray_origins[idx]
             ray_directions = self.ray_directions[idx]
             ray_targets = self.ray_targets[idx]
 
-        # random sampling
-        if self.num_random_rays > -1:
-            return batch_random_sampling(self.cfg, self.coords, (ray_origins, ray_directions, ray_targets))
+        # Random sampling if training
+        if self.type != DatasetType.VALIDATION:
+            ray_directions, ray_targets = batch_random_sampling(self.cfg, self.coords, (ray_directions, ray_targets))
 
         return ray_origins, ray_directions, ray_targets
 
@@ -122,16 +152,13 @@ class CachingDataset(Dataset):
             dim = -1,
         ).reshape((-1, 2))
 
-    def save_dataset(self, hwf, ray_origins, ray_directions, target, img_idx, cfg, type, batch_idx = -1):
+    def save_dataset(self, hwf, ray_bundle, img_idx, batch_idx = -1):
         """
             Script to run and cache a dataset for faster train-eval loops.
         """
-        batch_rays = torch.stack([ray_origins, ray_directions], dim = 0)
-
         cache_dict = {
             "hwf": hwf,
-            "ray_bundle": batch_rays.detach().cpu(),
-            "target": target.detach().cpu(),
+            "ray_bundle": tuple([ ray_type.detach().cpu() for ray_type in ray_bundle ])
         }
 
         if batch_idx != -1:
@@ -139,7 +166,8 @@ class CachingDataset(Dataset):
         else:
             path = str(img_idx).zfill(4) + ".data"
 
-        save_path = os.path.join(cfg.dataset.caching.cache_dir, type, path)
+        # location for the cached data
+        save_path = os.path.join(self.cfg.dataset.caching.cache_dir, self.type.value, path)
 
         torch.save(cache_dict, save_path)
 
@@ -158,25 +186,24 @@ class BlenderDataset(CachingDataset):
         to a full picture, so some additional pre-processing might be needed.
     """
 
-    def __init__(self, cfg, type = "train"):
+    def __init__(self, cfg, type = DatasetType.TRAIN):
         super(BlenderDataset, self).__init__(cfg, type)
         print("Loading Blender Data...")
 
     def load_dataset(self):
         self.num_random_rays = self.cfg.nerf.train.num_random_rays
         self.shuffle = True
-        self.dataset_path = Path(self.cfg.dataset.basedir) / f"transforms_{self.type}.json"
         images, poses, hwf = load_blender_data(self.dataset_path, reduced_resolution = self.cfg.dataset.half_res)
 
         if self.cfg.nerf.train.white_background:
-            images = images[..., :3] * images[..., -1:] + (1.0 - images[..., -1:])
+            images = images * images[..., -1:] + (1.0 - images[..., -1:])
 
         self.init_sampling(hwf)
         self.ray_directions, self.ray_origins = convert_poses_to_rays(
             poses, self.H, self.W, self.focal
         )
-        self.ray_targets = torch.from_numpy(images)[..., :3]
 
+        self.ray_targets = torch.from_numpy(images)
         if self.shuffle:
             shuffled_indices = np.arange(self.ray_targets.shape[0])
             np.random.shuffle(shuffled_indices)
@@ -188,24 +215,21 @@ class BlenderDataset(CachingDataset):
         # testskip = args.blender_stride TODO(0)
         images, poses, hwf = load_blender_data(self.dataset_path, reduced_resolution = self.cfg.dataset.half_res)
 
-        # Create dataset directory
-        os.makedirs(os.path.join(self.cfg.dataset.caching.cache_dir, self.type), exist_ok = True)
-
         # Coordinates to sample from
         self.init_sampling(hwf)
 
         for img_idx in trange(images.shape[0]):
-            ray_targets = images[img_idx].to(self.device)
+            ray_targets = torch.from_numpy(images[img_idx]).to(self.device)
             pose_target = poses[img_idx, :3, :4].to(self.device)
             ray_origins, ray_directions = get_ray_bundle(*hwf, pose_target)
 
-            if self.cfg.dataset.caching.sample_all:
-                self.save_dataset(hwf, ray_origins, ray_directions, ray_targets, img_idx, self.cfg, self.type)
+            if self.cfg.dataset.caching.sample_all or self.type == DatasetType.VALIDATION:
+                self.save_dataset(hwf, (ray_origins, ray_directions, ray_targets), img_idx)
             else:
                 for batch_idx in range(self.cfg.dataset.caching.num_variations):
-                    batch_rays = batch_random_sampling(self.cfg, self.coords, (ray_origins, ray_directions, ray_targets))
+                    batch_rays = batch_random_sampling(self.cfg, self.coords, (ray_directions, ray_targets))
 
-                    self.save_dataset(hwf, *batch_rays, img_idx, batch_idx, self.cfg, self.type)
+                    self.save_dataset(hwf, (ray_origins, *batch_rays), img_idx, batch_idx)
 
 
 class ScanNetDataset(Dataset):
