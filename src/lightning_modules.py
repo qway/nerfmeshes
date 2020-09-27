@@ -61,25 +61,31 @@ class LoggerCallback(Callback):
 
         return metrics
 
-    def on_fit_start(self, trainer, pl_module):
-        """Called when fit begins"""
-        self.global_pb = tqdm(
-            desc = "TRAIN",
-            total = trainer.max_steps,
-            position = 0,
-            initial = trainer.batch_idx,
-            leave = self.leave_global_progress,
-            disable = not self.global_progress,
-        )
+    def init_trackers(self, trainer, pl_module):
+        if self.global_pb is None:
+            # Initialize trainer tracker
+            self.global_pb = tqdm(
+                desc = "TRAIN",
+                total = trainer.max_steps,
+                position = 0,
+                initial = trainer.global_step,
+                leave = self.leave_global_progress,
+                disable = not self.global_progress,
+            )
 
-        self.val_pb = tqdm(
-            desc = "VALID",
-            total = pl_module.val_num_samples,
-            position = 1,
-            initial = 0,
-            leave = self.leave_global_progress,
-            disable = not self.global_progress,
-        )
+        if self.val_pb is None:
+            # Initialize valid tracker
+            self.val_pb = tqdm(
+                desc = "VALID",
+                total = pl_module.val_num_samples,
+                position = 1,
+                initial = 0,
+                leave = self.leave_global_progress,
+                disable = not self.global_progress,
+            )
+
+    def on_sanity_check_start(self, trainer, pl_module):
+        self.init_trackers(trainer, pl_module)
 
     def on_fit_end(self, trainer, pl_module):
         """Called when the trainer initialization end."""
@@ -88,11 +94,11 @@ class LoggerCallback(Callback):
 
     def on_train_epoch_start(self, trainer, pl_module):
         """Called when the train epoch begins."""
+        self.init_trackers(trainer, pl_module)
         self.global_pb.unpause()
 
     def on_train_batch_end(self, trainer, pl_module, batch, batch_idx, dataloader_idx):
         """Called when the training batch ends."""
-
         # Check if print individual step logs
         global_step = self.get_global_step(trainer)
         if global_step % self.cfg.experiment.print_every == 0:

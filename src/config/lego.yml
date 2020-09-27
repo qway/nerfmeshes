@@ -9,7 +9,7 @@ experiment:
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 200
+  validate_every: 1000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -23,7 +23,7 @@ logging:
 # Dataset parameters.
 dataset:
   # Type of dataset (Blender vs LLFF vs DeepVoxels vs something else)
-  type: blender
+  type: llff
   # Path to the root dir of the chosen dataset.
   basedir: ../data/nerf_synthetic/lego
   # For the Blender dataset (synthetic), optionally return images
@@ -41,6 +41,10 @@ dataset:
   far: 6
   # Num workers.
   num_workers: 4
+  # Down-sample factor for images from the LLFF dataset.
+  llff_downsample_factor: 8
+  # Determines the hold-out images for LLFF.
+  llff_hold_step: 8
   # Caching parameters (works only on Blender, LLFF).
   caching:
     # Use cached dataset, if it's not created, create one.
@@ -49,10 +53,6 @@ dataset:
     override_caching: False
     # Overrides basedir path to the following pre-cached dataset dir.
     cache_dir: ../data/cache/syn-lego-cache
-    # Down-sample factor for images from the LLFF dataset.
-    llff_downsample_factor: 8
-    # Determines the hold-out images for LLFF.
-    llffhold: 8
     # Number of random ray batches to draw per image as infinite data can't be cached.
     num_variations: 8
     # Sample all rays for the image and perform ray-batching during runtime.
@@ -170,7 +170,7 @@ nerf:
     num_coarse: 64
     # Number of depth samples per ray for the fine network.
     num_fine: 64
-    # Whether to render models using a white background.
+    # Whether to render models using a white background (only for synthetic datasets).
     white_background: False
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
@@ -190,7 +190,7 @@ nerf:
     num_coarse: 64
     # Number of depth samples per ray for the fine network.
     num_fine: 64
-    # Whether to render models using a white background.
+    # Whether to render models using a white background (only for synthetic datasets).
     white_background: False
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
@@ -198,4 +198,4 @@ nerf:
     # Sample linearly in disparity space, as opposed to in depth space.
     lindisp: False
     # Use smaller pool of random batch samples for faster validation epoch, use -1 if use the whole dataset.
-    num_samples: 1
+    num_samples: 3

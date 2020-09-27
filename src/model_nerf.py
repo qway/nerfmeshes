@@ -1,26 +1,15 @@
 import collections
-import os
 import numpy as np
-import argparse
-import time
 import torch
 import torchvision
-import yaml
 import pytorch_lightning as pl
 
 from pathlib import Path
-from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.callbacks import ModelCheckpoint
-from pytorch_lightning.core.lightning import LightningModule
-from pytorch_lightning.core.memory import ModelSummary
-from pytorch_lightning.loggers import TensorBoardLogger
-from torch.utils.data import DataLoader
 from typing import Tuple
-from data.datasets import BlenderDataset, ScanNetDataset, ColmapDataset, LLFFColmapDataset, DatasetType
+from torch.utils.data import DataLoader
+from data.datasets import BlenderDataset, ScanNetDataset, ColmapDataset, LLFFDataset, DatasetType
 from data.load_scannet import SensorData
-from nerf import models, CfgNode, mse2psnr, VolumeRenderer, RaySampleInterval, \
-    SamplePDF, DensityExtractor
-
+from nerf import models, CfgNode, mse2psnr, VolumeRenderer, RaySampleInterval, SamplePDF, DensityExtractor
 
 
 def flatten_dict(d, parent_key = "", sep = "_"):
@@ -69,12 +58,13 @@ def create_models(cfg) -> Tuple[torch.nn.Module, torch.nn.Module]:
 
 def get_ray_batch(ray_batch):
     """ Removes all unnecessary dimensions from a ray batch. """
-    ray_origins, ray_directions, ray_targets = ray_batch
+    ray_origins, ray_directions, ray_targets, ray_bounds = ray_batch
     ray_origins = ray_origins.view(-1, 3)
     ray_directions = ray_directions.view(-1, 3)
     ray_targets = ray_targets.view(-1, 3)
+    ray_bounds = ray_bounds.view(2)
 
-    return ray_origins, ray_directions, ray_targets
+    return ray_origins, ray_directions, ray_targets, ray_bounds
 
 
 def cast_to_image(tensor):
@@ -87,7 +77,7 @@ def cast_to_image(tensor):
     return img
 
 
-class NeRFModel(LightningModule):
+class NeRFModel(pl.LightningModule):
     def __init__(self, cfg, hparams = None, *args, **kwargs):
         super().__init__(*args, **kwargs)
         if hparams:
@@ -126,14 +116,11 @@ class NeRFModel(LightningModule):
         Returns: Tensor with the calculated pixel value for each ray.
 
         """
-        ray_origins, ray_directions = x
+        ray_origins, ray_directions, (near, far) = x
 
-        if self.model_coarse.training:
-            nerf_cfg = self.cfg.nerf.train
-        else:
-            nerf_cfg = self.cfg.nerf.validation
+        nerf_cfg = self.cfg.nerf.train if self.model_coarse.training else self.cfg.nerf.validation
 
-        ray_intervals = self.sample_interval(self.cfg.dataset.near, self.cfg.dataset.far)
+        ray_intervals = self.sample_interval(near, far)
         ray_intervals = ray_intervals[:ray_directions.shape[0]]
         ray_points = intervals_to_ray_points(ray_intervals, ray_directions, ray_origins)
 
@@ -179,9 +166,9 @@ class NeRFModel(LightningModule):
         return results
 
     def training_step(self, ray_batch, batch_idx):
-        ray_origins, ray_directions, ray_targets = get_ray_batch(ray_batch)
+        ray_origins, ray_directions, ray_targets, ray_bounds = get_ray_batch(ray_batch)
         rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
-            (ray_origins, ray_directions)
+            (ray_origins, ray_directions, ray_bounds)
         )
 
         coarse_loss = self.loss(rgb_coarse, ray_targets)
@@ -214,7 +201,7 @@ class NeRFModel(LightningModule):
         }
 
     def validation_step(self, image_ray_batch, batch_idx):
-        ray_origins, ray_directions, ray_targets = get_ray_batch(image_ray_batch)
+        ray_origins, ray_directions, ray_targets, ray_bounds = get_ray_batch(image_ray_batch)
 
         # Manual batching, since images are very expensive in terms of GPU memory
         batch_size = self.cfg.nerf.validation.chunksize
@@ -226,7 +213,7 @@ class NeRFModel(LightningModule):
         all_rgb_fine = []
         for i in range(0, ray_targets.shape[0], batch_size):
             rgb_coarse, _, _, rgb_fine, _, _ = self.forward(
-                (ray_origins, ray_directions[i: i + batch_size])
+                (ray_origins, ray_directions[i: i + batch_size], ray_bounds)
             )
 
             all_rgb_coarse.append(rgb_coarse)
@@ -303,15 +290,16 @@ class NeRFModel(LightningModule):
 
         return log_mean
 
-    def load_train_dataset(self):
+    def load_dataset(self, dataset_type):
+        dataset = None
         if self.cfg.dataset.type == "blender":
-            self.train_dataset = BlenderDataset(self.cfg, type = DatasetType.TRAIN)
+            dataset = BlenderDataset(self.cfg, type = dataset_type)
         elif self.cfg.dataset.type == "scannet":
             if not self.sensor_data:
                 self.sensor_data = SensorData(
                     self.dataset_basepath / (self.dataset_basepath.name + ".sens")
                 )
-            self.train_dataset = ScanNetDataset(
+            dataset = ScanNetDataset(
                 self.sensor_data,
                 num_random_rays = self.cfg.nerf.train.num_random_rays,
                 near = self.cfg.dataset.near,
@@ -322,46 +310,25 @@ class NeRFModel(LightningModule):
                 resolution = self.cfg.dataset.resolution
             )
         elif self.cfg.dataset.type == "colmap":
-            self.train_dataset = LLFFColmapDataset(
-                self.cfg.dataset.basedir,
-                num_random_rays = self.cfg.nerf.train.num_random_rays,
-                start = 1,  # Debug by loading only small part of the dataset
-                downscale_factor = self.cfg.dataset.downscale_factor
-            )
+            dataset = LLFFDataset(self.cfg, type = dataset_type)
+
+        return dataset
+
+    def load_train_dataset(self):
+        self.train_dataset = self.load_dataset(DatasetType.TRAIN)
+
+    def train_dataloader(self):
+
+        train_dataloader = DataLoader(self.train_dataset, batch_size = 1, shuffle = False, num_workers = self.cfg.dataset.num_workers, pin_memory = False)
+
+        return train_dataloader
 
     def load_val_dataset(self):
-        if self.cfg.dataset.type == "blender":
-            self.val_dataset = BlenderDataset(self.cfg, type = DatasetType.VALIDATION)
-        elif self.cfg.dataset.type == "scannet":
-            if not self.sensor_data:
-                self.sensor_data = SensorData(
-                    self.dataset_basepath / (self.dataset_basepath.name + ".sens")
-                )
-            self.val_dataset = ScanNetDataset(
-                self.sensor_data,
-                near = self.cfg.dataset.near,
-                far = self.cfg.dataset.far,
-                stop = 10,  # Debug by loading only small part of the dataset
-                skip = 100,
-                scale = self.cfg.dataset.scale_factor,
-                resolution = self.cfg.dataset.resolution
-            )
-        elif self.cfg.dataset.type == "colmap":
-            self.val_dataset = LLFFColmapDataset(
-                self.cfg.dataset.basedir,
-                num_random_rays = -1,
-                stop = 2,  # Debug by loading only small part of the dataset
-                downscale_factor = self.cfg.dataset.downscale_factor
-            )
+        self.val_dataset = self.load_dataset(DatasetType.VALIDATION)
 
         self.val_num_samples = self.cfg.nerf.validation.num_samples
         if self.val_num_samples != -1:
             self.val_num_samples = max(min(len(self.val_dataset), self.val_num_samples), 1)
-
-    def train_dataloader(self):
-        train_dataloader = DataLoader(self.train_dataset, batch_size = 1, shuffle = False, num_workers = self.cfg.dataset.num_workers, pin_memory = False)
-
-        return train_dataloader
 
     def val_dataloader(self):
         # Use a smaller pool of random batch samples
