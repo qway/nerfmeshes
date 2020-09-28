@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from nerf import get_minibatches
 
+from nerf.nerf_helpers import cumprod_exclusive
 from nerf import (
     CfgNode,
     get_ray_bundle,
@@ -156,18 +157,21 @@ def main():
         model_fine.eval()
 
     # Mesh Extraction
-    N = 480
+    N = 400
     iso_value = config_args.iso_level
-    batch_size = 1024
+    batch_size = 4096
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
+    gap = 1e0
+    gap_samples = 128
     distance_length = 0.001
     distance_threshold = 0.001
-    view_disparity = 1e-3
+    view_disparity = 1e-1
     limit = 1.2
     length = 4
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
+    dynamic_disparity = False
     specific_view = False
     adjust_normals = False
     plane_near = 0
@@ -286,6 +290,7 @@ def main():
     # Extracting the diffuse color
     # Ray targets
     targets = torch.from_numpy(vertices) / N * 2 * limit - limit
+
     # Swap x-axis and y-axis
     targets = targets[:, [1, 0, 2]]
 
@@ -295,8 +300,25 @@ def main():
     # Ray directions swapped based on Marching Cubes algorithm
     directions = directions[:, [1, 0, 2]]
 
+    if dynamic_disparity:
+        # Create some density samples
+        density_samples = torch.linspace(1e-3, gap, gap_samples).repeat(targets.shape[0], 1)[..., None]
+        density_points = targets[:, None, :] + density_samples * directions[:, None, :]
+        density_indices = ((density_points + limit) / (2 * limit) * N).long().clamp_(0, N - 1)
+        indices = (density_indices.view(-1, 3)[:, [1, 0, 2]] * (N ** torch.arange(2, -1, -1))[None, :]).sum(-1)
+
+        tn_density = torch.from_numpy(density)
+        tn_samples = tn_density[indices].view(targets.shape[0], gap_samples)
+        # tn_attenut = (tn_samples * cumprod_exclusive(tn_samples >= 0))
+        tn_attenut = tn_samples * cumprod_exclusive(torch.relu(tn_samples))
+        tn_discrip = (tn_attenut > 1e-13).sum(-1)
+        tn_offset = tn_discrip[:, None].float() / gap_samples * gap
+        print(tn_discrip[:, None].float().max())
+        print((tn_offset > view_disparity).sum())
+        print(tn_offset.shape)
+        view_disparity = torch.max(tn_offset, torch.ones((targets.shape[0], 1)) * view_disparity)
+
     # Ray origins
-    # ray_origins = length * directions
     ray_origins = targets + view_disparity * directions
 
     # Ray directions
@@ -316,6 +338,7 @@ def main():
     ray_batches = get_minibatches(rays, chunksize = batch_size)
 
     pred = []
+    print("Started ray-casting")
     for ray_batch in tqdm(ray_batches):
         # move to appropriate device
         ray_batch = ray_batch.to(device)

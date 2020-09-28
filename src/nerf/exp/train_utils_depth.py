@@ -65,7 +65,9 @@ def get_ln_samples_sm(depth_values, near, far, num_rays, options, mode, dtype, d
     t_vals = torch.linspace(0.0, 1.0, total, dtype = dtype, device = device) - off
     t_vals = ((torch.rand_like(t_vals) - 0.5) / fc1 + t_vals).sort(-1).values / fc2
     z_vals_space = t_vals.expand([ num_rays, total ])
-    z_vals_space = z_vals_space + depth_values
+
+    # z_vals_space = ((torch.rand((num_rays, total), device = device) - 0.5)).sort(-1).values
+    # z_vals_space = z_vals_space + depth_values
 
     z_vals = get_ln_samples(near, far, num_rays, options, mode, dtype, device, total)
     z_vals[mask_space.squeeze(-1)] = z_vals_space[mask_space]
@@ -134,7 +136,7 @@ def predict_and_render_radiance(
     total = getattr(options.nerf, mode).num_coarse
     pts, z_vals = sample_sm(ro, rd, near, far, num_rays, depth_values, options, mode)
     if tree is not None:
-        z_vals_t, indices, intersections, ray_mask = tree.batch_ray_voxel_intersect(tree.voxels, ro, rd, samples = total, verbose = mode != "train")
+        z_vals_t, indices, intersections, ray_mask = tree.batch_ray_voxel_intersect(tree.voxels, ro, rd, samples_count = total, verbose = mode != "train")
         
         pts[ray_mask] = ro[ray_mask][..., None, :] + rd[ray_mask][..., None, :] * z_vals_t[..., None]
         z_vals[ray_mask] = z_vals_t

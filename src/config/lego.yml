@@ -5,11 +5,11 @@ experiment:
   # Experiment logs will be stored at "logdir"/"id"
   logdir: logs
   # Seed for random number generators (for repeatability).
-  randomseed: 42  # Cause, why not?
+  randomseed: 42
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 20000
+  validate_every: 10000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -27,9 +27,13 @@ tree:
   max_depth: 4
   # Threshold weight for pruning
   eps: 0.005
+  # Voxel random sampling instead of linearly non-randomly
+  use_voxel_random_sampling: True
+  # Depth random sampling instead of linearly non-randomly
+  use_depth_random_sampling: True
   # Max tree voxels
-  max_voxel_count: 2048
-  # Step size before ticking ray batch integration (early steps, the scene is unresolved)
+  max_voxel_count: 1024
+  # Step size before ticking ray batch integration (initially the scene is unresolved)
   step_size_integration_offset: 4000
   # Step size consolidation
   step_size_tree: 8000
@@ -67,9 +71,8 @@ models:
     type: FlexibleNeRFModel
     # Number of layers in the model.
     num_layers: 4
-    # Number of hidden units in each layer of the MLP (multi-layer
-    # perceptron).
-    hidden_size: 128
+    # Number of hidden units in each layer of the MLP
+    hidden_size: 64
     # Add a skip connection once in a while. Note: This parameter
     # won't take affect unless num_layers > skip_connect_every.
     skip_connect_every: 4
@@ -100,7 +103,7 @@ models:
     num_layers: 8
     # Number of hidden units in each layer of the MLP (multi-layer
     # perceptron).
-    hidden_size: 128
+    hidden_size: 64
     # Add a skip connection once in a while. Note: This parameter
     # won't take affect unless num_layers > skip_connect_every.
     skip_connect_every: 3

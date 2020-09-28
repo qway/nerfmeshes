@@ -124,6 +124,7 @@ class TreeSampling:
             voxels_indices = torch.arange(self.memm.shape[0])
             mask_voxels = self.memm > self.config.tree.eps
             mask_voxels_list = voxels_indices[mask_voxels].tolist()
+            inv_weights = (1.0 - self.memm[mask_voxels]).tolist()
 
             voxel_count_initial = voxels_indices.shape[0]
             voxel_count_filtered = (~mask_voxels).sum()
@@ -131,9 +132,10 @@ class TreeSampling:
             print(
                 f"From {voxel_count_initial} voxels with {voxel_count_filtered} filtered to current {voxel_count_current}")
 
-            # Nodes closer to the root have higher priority
-            voxels_filtered = [self.root.children[index] for index in mask_voxels_list]
-            voxels_filtered = sorted(voxels_filtered, key = lambda node: node.depth)
+            # Nodes closer to the root with high weight have higher priority
+            voxels_filtered = [ self.root.children[index] for index in mask_voxels_list ]
+            voxels_filtered = sorted(enumerate(voxels_filtered), key = lambda item: (item[1].depth, inv_weights[item[0]]))
+            voxels_filtered = [ item[1] for item in voxels_filtered ]
 
             inner_size = self.config.tree.subdivision_inner_count ** 3 - 1
 
@@ -196,7 +198,22 @@ class TreeSampling:
 
         return out[:, :, None, :]
 
-    def batch_ray_voxel_intersect(self, bounds, origins, dirs, samples = 64, verbose = False):
+    def uniform_sampling_(self, tensor, count):
+        indices = torch.arange(0, tensor.shape[-1], device = tensor.device).expand(tensor.shape)
+        samples_count = tensor.long().sum(-1)
+        output = tensor.long() * (count // samples_count)[:, None]
+        remainder = count - output.sum(-1)
+
+        rem1 = torch.stack((remainder, tensor.sum(-1) - remainder), -1).flatten()
+        rem2 = torch.stack((torch.ones_like(remainder), torch.zeros_like(remainder)), -1).flatten()
+        remaining = rem2.repeat_interleave(rem1, 0)
+
+        output[tensor > 0] += remaining
+        samples = indices[tensor].repeat_interleave(output[tensor], -1).view(-1, count)
+
+        return samples
+
+    def batch_ray_voxel_intersect(self, bounds, origins, dirs, samples_count = 64, verbose = False):
         """ Returns batch of min and max intersections with their indices.
         Args:
             bounds (torch.Tensor): Tensor (Nx2x3) whose elements define the min/max bounds.
@@ -253,32 +270,48 @@ class TreeSampling:
 
         intersections = intersections[ray_mask]
 
-        # apply small weight for non-intersections
-        weights = torch.ones((rays_count, voxels_count,), device = bounds.device)
-        weights[~mask] = 1e-9
-        weights = weights[ray_mask]
-
         # see this https://github.com/pytorch/pytorch/issues/43768
         ray_rel = ray_mask.sum()
         if ray_rel == 0:
-            indices = torch.ones(0, samples, device = bounds.device)
+            indices = torch.ones(0, samples_count, device = bounds.device)
 
             return torch.rand_like(indices), indices.long(), intersections, ray_mask
 
-        # sample intersections
-        samples = torch.multinomial(weights, samples, replacement = True)
+        if self.config.tree.use_voxel_random_sampling:
+            # apply small weight for non-intersections
+            weights = torch.ones((rays_count, voxels_count,), device = bounds.device)
+            weights[~mask] = 1e-13
+            weights = weights[ray_mask]
+
+            # sample intersections
+            samples = torch.multinomial(weights, samples_count, replacement = True)
+        else:
+            # uniform interleaved deterministic sampling
+            samples = self.uniform_sampling_(mask[ray_mask], samples_count)
+
         samples_indices = samples[..., None].expand(-1, -1, 2)
 
         # clamp expected samples and gather intersection samples
         intersections = intersections.clamp(self.ray_near, self.ray_far)
         values = intersections.gather(-2, samples_indices)
 
-        # sample
-        z_vals = values[..., 0] + (values[..., 1] - values[..., 0]) * torch.rand_like(values[..., 0], device = bounds.device)
-        z_vals, indices_ordered = z_vals.sort(-1)
+        values_min, values_max = values[..., 0], values[..., 1]
+        if self.config.tree.use_depth_random_sampling:
+            # random sampling
+            value_samples = torch.rand_like(values_min, device = bounds.device)
+            z_vals = values_min + (values_max - values_min) * value_samples
+        else:
+            # deterministic sampling (not the most efficient one)
+            # minxx = torch.max(values_min.min(-1).values, torch.tensor(self.ray_near, device = bounds.device).float())
+            # maxxx = torch.min(values_max.max(-1).values, torch.tensor(self.ray_far, device = bounds.device).float())
+            minxx = values_min.min(-1).values
+            maxxx = values_max.max(-1).values
 
-        indices = torch.arange(voxels_count, device = bounds.device).repeat(ray_rel, 1).gather(-1, samples)
-        indices = indices.gather(-1, indices_ordered)
+            value_samples = torch.linspace(0., 1., samples_count, device = bounds.device).expand(values_min.shape)
+            z_vals = minxx[:, None] + (maxxx - minxx)[:, None] * value_samples
+
+        z_vals, indices_ordered = z_vals.sort(-1)
+        indices = samples.gather(-1, indices_ordered)
 
         return z_vals, indices, intersections, ray_mask
 

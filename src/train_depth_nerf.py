@@ -3,7 +3,6 @@ import glob
 import os
 import time
 import imageio
-import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -165,12 +164,8 @@ def main():
     # insert dict to tensorboard
     rec_insert(cfg)
 
-    data_frame = pd.DataFrame(params_dict.items(), columns = [ "Param", "Value" ])
-    writer.add_text("parameters", data_frame.to_markdown())
-    writer.add_text("description", configargs.message)
-
     # Create a tree for sampling
-    tree = TreeSampling(cfg, device)
+    tree = TreeSampling(cfg, device) if cfg.tree.use_tree else None
 
     # TODO: Prepare raybatch tensor if batching random rays
     # generates 2x by copying the arange output across consecutive dimensions, reverse the values when stacking
@@ -338,17 +333,18 @@ def main():
             x = torch.arange(0, y.shape[0]).cpu().detach().numpy()
             create_plot(x, y, title)
 
-        step_size_tree = cfg.tree.step_size_tree
-        if i % step_size_tree == 0 and i > 0:
-            plot_tree("Tree Memm")
-            tree.consolidate()
-            print(f"Tree was subdivided")
+        if tree is not None:
+            step_size_tree = cfg.tree.step_size_tree
+            if i % step_size_tree == 0 and i > 0:
+                plot_tree("Tree Memm")
+                tree.consolidate()
+                print(f"Tree was subdivided")
 
-        if i % step_size_tree == 0 and tree is not None:
-            vertices, faces, colors = create_scene([ tree.flatten() ])
-            writer.add_mesh('tree', vertices = vertices.unsqueeze(0), colors = colors.unsqueeze(0),
-                            faces = faces.unsqueeze(0),
-                            global_step = i // step_size_tree)
+            if i % step_size_tree == 0 and tree is not None:
+                vertices, faces, colors = create_scene([ tree.flatten() ])
+                writer.add_mesh('tree', vertices = vertices.unsqueeze(0), colors = colors.unsqueeze(0),
+                                faces = faces.unsqueeze(0),
+                                global_step = i // step_size_tree)
 
         writer.add_scalar("train/loss", loss.item(), i)
         writer.add_scalar("train/coarse_loss", coarse_loss.item(), i)
