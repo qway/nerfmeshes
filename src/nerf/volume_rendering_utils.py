@@ -9,6 +9,7 @@ def volume_render_radiance_field(
     ray_directions,
     radiance_field_noise_std=0.0,
     white_background=False,
+    last=False
 ):
     # TESTED
     one_e_10 = torch.tensor(
@@ -49,5 +50,10 @@ def volume_render_radiance_field(
 
     if white_background:
         rgb_map = rgb_map + (1.0 - acc_map[..., None])
+
+    if last:
+        depth_weight = weights.sum(-1)
+        depth_mask = depth_weight < 1.0
+        depth_map[depth_mask] = 0
 
     return rgb_map, disp_map, acc_map, weights, depth_map

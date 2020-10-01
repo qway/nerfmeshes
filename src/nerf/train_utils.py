@@ -114,6 +114,7 @@ def predict_and_render_radiance(
             encode_position_fn,
             encode_direction_fn,
         )
+
         rgb_fine, disp_fine, acc_fine, _, depth_map_fine = volume_render_radiance_field(
             radiance_field,
             z_vals,
@@ -122,6 +123,7 @@ def predict_and_render_radiance(
                 options.nerf, mode
             ).radiance_field_noise_std,
             white_background=getattr(options.nerf, mode).white_background,
+            last = True
         )
 
     return rgb_coarse, disp_coarse, acc_coarse, depth_coarse, rgb_fine, disp_fine, acc_fine, depth_map_fine

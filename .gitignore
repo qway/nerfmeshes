@@ -135,5 +135,7 @@ data/*
 **/cache/
 **/*logs*/
 .venv/
+**/*.obj
+
 
 

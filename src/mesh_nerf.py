@@ -17,6 +17,7 @@ from nerf import (
     get_embedding_function,
 )
 
+
 def export_obj(vertices, triangles, diffuse, normals, filename):
     """
     Exports a mesh in the (.obj) format.
@@ -223,7 +224,6 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
 
     # Export model
     export_obj(vertices, triangles, diffuse_fine, normals, "lego.obj")
-
 
 
 if __name__ == "__main__":
