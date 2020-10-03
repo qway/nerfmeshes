@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 from nerf import get_minibatches
 
+from nerf.nerf_helpers import cumprod_exclusive
 from nerf import (
     CfgNode,
     models,
@@ -46,18 +47,21 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 
 def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_position_fn, encode_direction_fn, device):
     # Mesh Extraction
-    N = 256
+    N = 400
     iso_value = config_args.iso_level
-    batch_size = 1024
+    batch_size = 4096
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
+    gap = 1e0
+    gap_samples = 128
     distance_length = 0.001
     distance_threshold = 0.001
-    view_disparity = 0.2
+    view_disparity = 1e-1
     limit = 1.2
     length = 4
     t = np.linspace(-limit, limit, N)
     sampling_method = 0
+    dynamic_disparity = False
     specific_view = False
     adjust_normals = False
     plane_near = 0
@@ -91,7 +95,6 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
         grid_alpha = density.reshape((N, N, N))
         print(f"Max density: {grid_alpha.max()}, Min density {grid_alpha.min()}, Mean density {grid_alpha.mean()}")
         print(f"Querying based on iso level: {iso_value}")
-        # iso_value = grid_alpha.min() * 0.6 + grid_alpha.max() * 0.4
 
         # Extracting iso-surface triangulated
         vertices, triangles, normals, values = measure.marching_cubes(grid_alpha, iso_value)
@@ -177,6 +180,7 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
     # Extracting the diffuse color
     # Ray targets
     targets = torch.from_numpy(vertices) / N * 2 * limit - limit
+
     # Swap x-axis and y-axis
     targets = targets[:, [1, 0, 2]]
 
@@ -186,8 +190,25 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
     # Ray directions swapped based on Marching Cubes algorithm
     directions = directions[:, [1, 0, 2]]
 
+    if dynamic_disparity:
+        # Create some density samples
+        density_samples = torch.linspace(1e-3, gap, gap_samples).repeat(targets.shape[0], 1)[..., None]
+        density_points = targets[:, None, :] + density_samples * directions[:, None, :]
+        density_indices = ((density_points + limit) / (2 * limit) * N).long().clamp_(0, N - 1)
+        indices = (density_indices.view(-1, 3)[:, [1, 0, 2]] * (N ** torch.arange(2, -1, -1))[None, :]).sum(-1)
+
+        tn_density = torch.from_numpy(density)
+        tn_samples = tn_density[indices].view(targets.shape[0], gap_samples)
+        # tn_attenut = (tn_samples * cumprod_exclusive(tn_samples >= 0))
+        tn_attenut = tn_samples * cumprod_exclusive(torch.relu(tn_samples))
+        tn_discrip = (tn_attenut > 1e-13).sum(-1)
+        tn_offset = tn_discrip[:, None].float() / gap_samples * gap
+        print(tn_discrip[:, None].float().max())
+        print((tn_offset > view_disparity).sum())
+        print(tn_offset.shape)
+        view_disparity = torch.max(tn_offset, torch.ones((targets.shape[0], 1)) * view_disparity)
+
     # Ray origins
-    # ray_origins = length * directions
     ray_origins = targets + view_disparity * directions
 
     # Ray directions
@@ -204,9 +225,10 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
         view_dirs = ray_directions / ray_directions.norm(p = 2, dim = -1).unsqueeze(-1)
         rays = torch.cat((rays, view_dirs.view((-1, 3))), dim = -1)
 
-    ray_batches = get_minibatches(rays, chunksize = 2048)
+    ray_batches = get_minibatches(rays, chunksize = batch_size)
 
     pred = []
+    print("Started ray-casting")
     for ray_batch in tqdm(ray_batches):
         # move to appropriate device
         ray_batch = ray_batch.to(device)

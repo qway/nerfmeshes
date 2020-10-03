@@ -62,7 +62,7 @@ def read_depth_from_exr(filename):
     return img
 
 
-def load_blender_data(basedir, categories = None, half_res = False, testskip = 1, debug = False):
+def load_blender_data(basedir, categories = None, half_res = False, testskip = 1, debug = False, empty = 0.):
     splits = [ "train", "val", "test" ] if categories is None else categories
 
     # Load meta data files
@@ -95,10 +95,10 @@ def load_blender_data(basedir, categories = None, half_res = False, testskip = 1
             if meta_name_type == "test_high_res":
                 f_depth_name = os.path.join(basedir, frame["file_path"] + "_depth_0001.exr")
                 depth_curr = read_depth_from_exr(f_depth_name)
-                depth_curr[depth_curr == depth_curr.max(initial = 0)] = 0
+                depth_curr[depth_curr == depth_curr.max(initial = 0)] = empty
                 depth_curr = depth_curr[..., 0]
             else:
-                depth_curr = np.zeros((800, 800))
+                depth_curr = np.ones((800, 800)) * empty
 
             curr_depth_imgs.append(depth_curr)
             curr_poses.append(np.array(frame["transform_matrix"]))

@@ -5,15 +5,38 @@ experiment:
   # Experiment logs will be stored at "logdir"/"id"
   logdir: logs
   # Seed for random number generators (for repeatability).
-  randomseed: 42  # Cause, why not?
+  randomseed: 42
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 100
+  validate_every: 10000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
   print_every: 100
+
+# Tree parameters.
+tree:
+  # Whether to use tree voxel sampling instead of hierarchical sampling
+  use_tree: True
+  # Root subdivision power, higher requires more memory
+  subdivision_outer_count: 8
+  # Tree subdivision power, higher requires more memory
+  subdivision_inner_count: 2
+  # Max tree depth, higher requires more memory
+  max_depth: 4
+  # Threshold weight for pruning
+  eps: 0.005
+  # Voxel random sampling instead of linearly non-randomly
+  use_voxel_random_sampling: True
+  # Depth random sampling instead of linearly non-randomly
+  use_depth_random_sampling: True
+  # Max tree voxels
+  max_voxel_count: 1024
+  # Step size before ticking ray batch integration (initially the scene is unresolved)
+  step_size_integration_offset: 4000
+  # Step size consolidation
+  step_size_tree: 8000
 
 # Dataset parameters.
 dataset:
@@ -26,7 +49,7 @@ dataset:
   cachedir: cache/legocache200
   # For the Blender datasets (synthetic), optionally return images
   # at half the original resolution of 800 x 800, to save space.
-  half_res: True
+  half_res: False
   # Stride (include one per "testskip" images in the dataset).
   testskip: 1
   # Do not use NDC (normalized device coordinates). Usually True for
@@ -36,6 +59,9 @@ dataset:
   near: 2
   # Far clip plane (clip all depth values farther than this threshold).
   far: 6
+  # Depth empty space plane.
+  empty: 0.
+
 
 # Model parameters.
 models:
@@ -44,13 +70,12 @@ models:
     # Name of the torch.nn.Module class that implements the model.
     type: FlexibleNeRFModel
     # Number of layers in the model.
-    num_layers: 8
-    # Number of hidden units in each layer of the MLP (multi-layer
-    # perceptron).
-    hidden_size: 128
+    num_layers: 4
+    # Number of hidden units in each layer of the MLP
+    hidden_size: 64
     # Add a skip connection once in a while. Note: This parameter
     # won't take affect unless num_layers > skip_connect_every.
-    skip_connect_every: 3
+    skip_connect_every: 4
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -78,7 +103,7 @@ models:
     num_layers: 8
     # Number of hidden units in each layer of the MLP (multi-layer
     # perceptron).
-    hidden_size: 128
+    hidden_size: 64
     # Add a skip connection once in a while. Note: This parameter
     # won't take affect unless num_layers > skip_connect_every.
     skip_connect_every: 3
@@ -131,7 +156,7 @@ nerf:
     num_random_rays: 4096  # 32 * 32 * 4
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
-    chunksize: 32768  # 131072  # 1024 * 32
+    chunksize: 4096  # 131072  # 1024 * 32
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
@@ -149,7 +174,7 @@ nerf:
   validation:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    chunksize: 32768   # 1024 * 32
+    chunksize: 4096   # 1024 * 32
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
