@@ -2,6 +2,12 @@ import argparse
 import glob
 import os
 import time
+import logging
+import matplotlib.pyplot as plt
+import numpy as np
+import torch
+import torchvision
+import yaml
 
 from pytorch3d.io import load_obj, save_obj
 from pytorch3d.structures import Meshes
@@ -13,18 +19,10 @@ from pytorch3d.loss import (
     mesh_laplacian_smoothing,
     mesh_normal_consistency,
 )
-import logging
-
-import matplotlib.pyplot as plt
-import numpy as np
-import torch
-import torchvision
-import yaml
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
-from mesh_nerf6 import export_obj, generate
-
-from nerf4 import (CfgNode, get_embedding_function, get_ray_bundle, img2mse,
+from mesh_nerf_chamfer import export_obj, generate
+from nerf import (CfgNode, get_embedding_function, get_ray_bundle, img2mse,
                   load_blender_data, load_llff_data, meshgrid_xy, models,
                   mse2psnr, run_one_iter_of_nerf)
 
@@ -188,7 +186,6 @@ def main():
         start_iter = checkpoint["iter"]
 
     # # TODO: Prepare raybatch tensor if batching random rays
-
     ##############################################################################################
 
     # trg_obj = os.path.join('../data/output/lego.obj')
@@ -213,12 +210,11 @@ def main():
     # We construct a Meshes structure for the target mesh
     trg_mesh = Meshes(verts=[verts], faces=[faces_idx])
     #####################################################################################################
-
     for i in trange(start_iter, cfg.experiment.train_iters):
 
         model_coarse.train()
         if model_fine:
-            model_coarse.train()
+            model_fine.train()
 
         rgb_coarse, rgb_fine = None, None
         target_ray_values = None
@@ -307,8 +303,6 @@ def main():
         # else:
         #     loss = coarse_loss
 
-
-
         loss = coarse_loss + (fine_loss if fine_loss is not None else 0.0)
         # loss =  10 * original_loss + ( fine_chamfer_loss if fine_chamfer_loss is not None else 0.0)
         loss.backward()
@@ -339,8 +333,6 @@ def main():
             )
             logging.info(f"[Train] Iter: {str(i)}   Diffuse Loss: {loss.item()}   PSNR: {str(psnr)}")
 
-
-
         writer.add_scalar("train/loss", loss.item(), i)
         writer.add_scalar("train/coarse_loss", coarse_loss.item(), i)
         if rgb_fine is not None:
@@ -348,7 +340,6 @@ def main():
         writer.add_scalar("train/psnr", psnr, i)
 
         # Validation
-
         if (
             i % cfg.experiment.validate_every == 0
             or i == cfg.experiment.train_iters - 1
@@ -458,7 +449,7 @@ def main():
                 psnr = mse2psnr(loss.item())
                 writer.add_scalar("validation/loss", loss.item(), i)
                 writer.add_scalar("validation/coarse_loss", coarse_loss.item(), i)
-                writer.add_scalar("validataion/psnr", psnr, i)
+                writer.add_scalar("validation/psnr", psnr, i)
                 writer.add_image(
                     "validation/rgb_coarse", cast_to_image(rgb_coarse[..., :3]), i
                 )

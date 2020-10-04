@@ -12,9 +12,9 @@ from skimage import measure
 from scipy.spatial import KDTree
 from tqdm import tqdm
 
-from nerf4 import get_minibatches
+from nerf import get_minibatches
 
-from nerf4 import (
+from nerf import (
     CfgNode,
     load_blender_data,
     load_llff_data,

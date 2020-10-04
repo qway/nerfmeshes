@@ -134,6 +134,11 @@ models/*
 data/*
 .idea
 **/cache/
-**/*logs/
+**/*logs*/
 .venv/
+**/*.obj
+**/__pycache__
+
+
+
 

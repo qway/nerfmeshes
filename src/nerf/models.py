@@ -201,6 +201,7 @@ class FlexibleNeRFModel(torch.nn.Module):
         self.dim_xyz = include_input_xyz + 2 * 3 * num_encoding_fn_xyz
         self.dim_dir = include_input_dir + 2 * 3 * num_encoding_fn_dir
         self.skip_connect_every = skip_connect_every
+        self.num_layers = num_layers
         if not use_viewdirs:
             self.dim_dir = 0
 
@@ -235,12 +236,13 @@ class FlexibleNeRFModel(torch.nn.Module):
             xyz, view = x[..., : self.dim_xyz], x[..., self.dim_xyz :]
         else:
             xyz = x[..., : self.dim_xyz]
+
         x = self.layer1(xyz)
         for i in range(len(self.layers_xyz)):
             if (
                 i % self.skip_connect_every == 0
                 and i > 0
-                and i != len(self.linear_layers) - 1
+                and i != self.num_layers - 1
             ):
                 x = torch.cat((x, xyz), dim=-1)
             x = self.relu(self.layers_xyz[i](x))
