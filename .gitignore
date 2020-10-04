@@ -134,13 +134,10 @@ models/*
 data/*
 .idea
 **/cache/
-**/*logs*/
+logs/
 .venv/
 **/*.obj
-<<<<<<< HEAD
-=======
 **/__pycache__
->>>>>>> origin/chamfer
 
 
 

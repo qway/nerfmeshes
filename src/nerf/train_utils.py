@@ -124,7 +124,7 @@ def predict_and_render_radiance(
                 options.nerf, mode
             ).radiance_field_noise_std,
             white_background=getattr(options.nerf, mode).white_background,
-            last = True
+            last = False
         )
 
     return rgb_coarse, None, None, depth_coarse, rgb_fine, None, None, depth_fine

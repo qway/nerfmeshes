@@ -24,7 +24,7 @@ def cache_nerf_dataset(args):
     i_train, i_val, i_test = None, None, None
 
     if args.type == "blender":
-        images, poses, render_poses, hwf, i_split = load_blender_data(
+        images, poses, _, render_poses, hwf, i_split = load_blender_data(
             args.datapath, half_res=args.blender_half_res, testskip=args.blender_stride
         )
 

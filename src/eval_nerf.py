@@ -206,7 +206,7 @@ def main():
         with torch.no_grad():
             pose = pose[:3, :4]
             ray_origins, ray_directions = get_ray_bundle(hwf[0], hwf[1], hwf[2], pose)
-            rgb_coarse, z_vals, weights, depth_coarse, rgb_fine, disp_fine, _, depth_fine, radiance = run_one_iter_of_nerf(
+            rgb_coarse, _, _, depth_coarse, rgb_fine, _, _, depth_fine = run_one_iter_of_nerf(
                 hwf[0],
                 hwf[1],
                 hwf[2],
@@ -225,7 +225,6 @@ def main():
                 pass
                 # disp = disp_fine if disp_fine is not None else disp_coarse
 
-        print(rgb_coarse.shape)
         coarse_loss = torch.nn.functional.mse_loss(
             rgb_coarse[..., :3], img_target[..., :3]
         )
@@ -271,10 +270,6 @@ def main():
                 imageio.imwrite(savefile, cast_to_disparity_image(disp))
 
         tqdm.write(f"Avg time per image: {sum(times_per_image) / (i + 1)}")
-
-        if (i + 1) % 5 == 0:
-            print(i)
-            exit(-1)
 
 
 if __name__ == "__main__":

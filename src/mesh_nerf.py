@@ -1,16 +1,13 @@
 import argparse
 import numpy as np
 import torch
-import torchvision
 import yaml
 
 from nerf.train_utils import predict_and_render_radiance
 from skimage import measure
 from scipy.spatial import KDTree
 from tqdm import tqdm
-
 from nerf import get_minibatches
-
 from nerf.nerf_helpers import cumprod_exclusive
 from nerf import (
     CfgNode,
@@ -45,9 +42,54 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
             fh.write("\n")
 
 
+def extract_geometry(model, encode_position_fn, encode_direction_fn, N = 400, batch_size = 4096, limit = 1.2, iso_value = 32):
+    # Iso grid extraction
+    t = np.linspace(-limit, limit, N)
+
+    query_pts = np.stack(np.meshgrid(t, t, t), -1).astype(np.float32)
+    pts = torch.from_numpy(query_pts)
+    dimension = pts.shape[-1]
+
+    pts_flat = pts.reshape((-1, dimension))
+    pts_flat_batch = pts_flat.reshape((-1, batch_size, dimension))
+
+    density = np.zeros((pts_flat.shape[0]))
+    for idx, batch in enumerate(tqdm(pts_flat_batch)):
+        batch = batch.cuda()
+
+        embedded = encode_position_fn(batch)
+        if encode_direction_fn is not None:
+            embedded_dirs = encode_direction_fn(batch)
+            embedded = torch.cat((embedded, embedded_dirs), dim=-1)
+
+        # extract density + rgb
+        result_batch = model(embedded)
+
+        # Extracting the density
+        density[idx * batch_size: (idx + 1) * batch_size] = result_batch[..., 3].cpu().detach().numpy()
+
+    # Create a 3D density grid
+    grid_alpha = density.reshape((N, N, N))
+
+    # Adaptive iso level
+    min_a, max_a, std_a = grid_alpha.min(), grid_alpha.max(), grid_alpha.std()
+    iso_value = min(max(iso_value, min_a + std_a), max_a - std_a)
+    print(f"Min density {min_a}, Max density: {max_a}, Mean density {grid_alpha.mean()}")
+    print(f"Querying based on iso level: {iso_value}")
+
+    # Extracting iso-surface triangulated
+    vertices, triangles, normals, values = measure.marching_cubes(grid_alpha, iso_value)
+
+    normals = torch.from_numpy(np.ascontiguousarray(normals))
+    vertices = torch.from_numpy(np.ascontiguousarray(vertices)) / N * 2 * limit - limit
+    triangles = torch.from_numpy(np.ascontiguousarray(triangles))
+
+    return vertices, triangles, normals, grid_alpha, pts_flat, density
+
+
 def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_position_fn, encode_direction_fn, device):
     # Mesh Extraction
-    N = 400
+    N = 192
     iso_value = config_args.iso_level
     batch_size = 4096
     density_samples_count = 6
@@ -58,10 +100,8 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
     distance_threshold = 0.001
     view_disparity = 1e-1
     limit = 1.2
-    length = 4
-    t = np.linspace(-limit, limit, N)
     sampling_method = 0
-    dynamic_disparity = False
+    dynamic_disparity = True
     specific_view = False
     adjust_normals = False
     plane_near = 0
@@ -69,42 +109,13 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
 
     vertices, triangles, normals, diffuse = None, None, None, None
     if config_args.cache_mesh:
-        query_pts = np.stack(np.meshgrid(t, t, t), -1).astype(np.float32)
-        pts = torch.from_numpy(query_pts)
-        dimension = pts.shape[-1]
-
-        pts_flat = pts.reshape((-1, dimension))
-        pts_flat_batch = pts_flat.reshape((-1, batch_size, dimension))
-
-        density = np.zeros((pts_flat.shape[0]))
-        for idx, batch in enumerate(tqdm(pts_flat_batch)):
-            batch = batch.cuda()
-
-            embedded = encode_position_fn(batch)
-            if encode_direction_fn is not None:
-                embedded_dirs = encode_direction_fn(batch)
-                embedded = torch.cat((embedded, embedded_dirs), dim = -1)
-
-            # result_batch = model_fine(embedded)
-            result_batch = model_fine(embedded)
-
-            # Extracting the density
-            density[idx * batch_size: (idx + 1) * batch_size] = result_batch[..., 3].cpu().detach().numpy()
-
-        # Create a 3D density grid
-        grid_alpha = density.reshape((N, N, N))
-        print(f"Max density: {grid_alpha.max()}, Min density {grid_alpha.min()}, Mean density {grid_alpha.mean()}")
-        print(f"Querying based on iso level: {iso_value}")
-
-        # Extracting iso-surface triangulated
-        vertices, triangles, normals, values = measure.marching_cubes(grid_alpha, iso_value)
-        vertices = np.ascontiguousarray(vertices)
-        normals = np.ascontiguousarray(normals)
+        # Extract model geometry
+        vertices, triangles, normals, grid_alpha, pts_flat, density = extract_geometry(model_fine, encode_position_fn,
+            encode_direction_fn, N, batch_size, limit, iso_value)
 
         # Query directly without specific-views
         if specific_view:
-            targets = torch.from_numpy(vertices) / N * 2 * limit - limit
-            targets = targets[:, [1, 0, 2]]
+            targets = vertices[:, [1, 0, 2]]
             stride = 512
             diffuse = np.zeros((len(targets), 3))
             for idx in range(0, len(targets) // stride + 1):
@@ -117,7 +128,7 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
                     embedded_dirs = encode_direction_fn(batch)
                     embedded = torch.cat((embedded, embedded_dirs), dim = -1)
 
-                # result_batch = model_fine(embedded)
+                #
                 result_batch = model_fine(embedded)
 
                 # Query the whole diffuse map
@@ -134,7 +145,7 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
             # Adjust normals with the assumption of having proper geometry
             print("Adjusting normals")
             for index, vertex in enumerate(tqdm(vertices)):
-                vertex_norm = vertex[[1, 0, 2]] / N * 2 * limit - limit
+                vertex_norm = vertex[[1, 0, 2]]
                 vertex_direction = normals[index][[1, 0, 2]]
 
                 # Sample points across the ray direction (a.k.a normal)
@@ -172,20 +183,20 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
                 if sample_density_1 < sample_density_2:
                     normals[index] *= (-1)
 
-        np.save("mesh_sample.npy", (vertices, triangles, normals))
+        torch.save((vertices, triangles, normals), "mesh_sample.pt")
         print("Saved successfully")
     else:
-        vertices, triangles, normals = np.load("mesh_sample.npy", allow_pickle = True)
+        vertices, triangles, normals = torch.load("mesh_sample.pt")
 
     # Extracting the diffuse color
     # Ray targets
-    targets = torch.from_numpy(vertices) / N * 2 * limit - limit
+    targets = vertices
 
     # Swap x-axis and y-axis
     targets = targets[:, [1, 0, 2]]
 
     # Ray directions
-    directions = torch.from_numpy(normals)
+    directions = normals
 
     # Ray directions swapped based on Marching Cubes algorithm
     directions = directions[:, [1, 0, 2]]
@@ -203,9 +214,6 @@ def export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_pos
         tn_attenut = tn_samples * cumprod_exclusive(torch.relu(tn_samples))
         tn_discrip = (tn_attenut > 1e-13).sum(-1)
         tn_offset = tn_discrip[:, None].float() / gap_samples * gap
-        print(tn_discrip[:, None].float().max())
-        print((tn_offset > view_disparity).sum())
-        print(tn_offset.shape)
         view_disparity = torch.max(tn_offset, torch.ones((targets.shape[0], 1)) * view_disparity)
 
     # Ray origins
@@ -344,7 +352,4 @@ if __name__ == "__main__":
     if model_fine:
         model_fine.eval()
 
-    use_marching_cubes = False
-    if use_marching_cubes:
-        export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_position_fn, encode_direction_fn,
-                              device)
+    export_marching_cubes(model_coarse, model_fine, config_args, cfg, encode_position_fn, encode_direction_fn, device)

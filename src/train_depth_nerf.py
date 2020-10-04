@@ -2,7 +2,6 @@ import argparse
 import glob
 import os
 import time
-import imageio
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -11,11 +10,8 @@ import yaml
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
 
-from nerf import (CfgNode, get_embedding_function, get_ray_bundle, img2mse,
-                  load_blender_data, load_llff_data, meshgrid_xy, models,
-                  mse2psnr, TreeSampling, create_scene)
-
-# from nerf import (run_one_iter_of_nerf)
+from nerf import CfgNode, get_embedding_function, get_ray_bundle, img2mse
+from nerf import load_blender_data, load_llff_data, meshgrid_xy, models, mse2psnr, TreeSampling, create_scene
 from nerf.exp import (run_one_iter_of_nerf)
 
 

@@ -2,17 +2,35 @@ import argparse
 import glob
 import os
 import time
-
 import numpy as np
 import torch
 import torchvision
 import yaml
+
+# git+https://github.com/facebookresearch/pytorch3d.git@stable
+from pytorch3d.io import load_obj, save_obj
+from pytorch3d.structures import Meshes
+from pytorch3d.ops import sample_points_from_meshes
+from pytorch3d.loss import chamfer_distance
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm, trange
-
+from mesh_nerf import extract_geometry
 from nerf import (CfgNode, get_embedding_function, get_ray_bundle, img2mse,
                   load_blender_data, load_llff_data, meshgrid_xy, models,
                   mse2psnr, run_one_iter_of_nerf)
+
+
+def create_mesh(verts, faces_idx):
+    # We scale normalize and center the target mesh to fit in a sphere of radius 1 centered at (0,0,0).
+    # (scale, center) will be used to bring the predicted mesh to its original center and scale
+    verts = verts - verts.mean(0)
+    scale = max(verts.abs().max(0)[0])
+    verts = verts / scale
+
+    # We construct a Meshes structure for the target mesh
+    target_mesh = Meshes(verts=[verts], faces=[faces_idx])
+
+    return target_mesh
 
 
 def main():
@@ -25,6 +43,12 @@ def main():
         type=str,
         default="",
         help="Path to load saved checkpoint from.",
+    )
+    parser.add_argument(
+        "--mesh-path",
+        type=str,
+        default="lego.obj",
+        help="Path to model replica.",
     )
     configargs = parser.parse_args()
 
@@ -42,6 +66,7 @@ def main():
     train_paths, validation_paths = None, None
     images, poses, render_poses, hwf, i_split = None, None, None, None, None
     H, W, focal, i_train, i_val, i_test = None, None, None, None, None, None
+
     if hasattr(cfg.dataset, "cachedir") and os.path.exists(cfg.dataset.cachedir):
         train_paths = glob.glob(os.path.join(cfg.dataset.cachedir, "train", "*.data"))
         validation_paths = glob.glob(
@@ -52,7 +77,7 @@ def main():
         # Load dataset
         images, poses, render_poses, hwf = None, None, None, None
         if cfg.dataset.type.lower() == "blender":
-            images, poses, render_poses, hwf, i_split = load_blender_data(
+            images, poses, _, render_poses, hwf, i_split = load_blender_data(
                 cfg.dataset.basedir,
                 half_res=cfg.dataset.half_res,
                 testskip=cfg.dataset.testskip,
@@ -137,12 +162,14 @@ def main():
     trainable_parameters = list(model_coarse.parameters())
     if model_fine is not None:
         trainable_parameters += list(model_fine.parameters())
+
     optimizer = getattr(torch.optim, cfg.optimizer.type)(
         trainable_parameters, lr=cfg.optimizer.lr
     )
 
     # Setup logging.
     logdir = os.path.join(cfg.experiment.logdir, cfg.experiment.id)
+
     os.makedirs(logdir, exist_ok=True)
     writer = SummaryWriter(logdir)
     # Write out config parameters.
@@ -161,7 +188,16 @@ def main():
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         start_iter = checkpoint["iter"]
 
-    # # TODO: Prepare raybatch tensor if batching random rays
+    # target 3D mesh
+    verts, faces, _ = load_obj(os.path.join(cfg.experiment.meshdir, configargs.mesh_path))
+
+    # find the faces and vertices
+    faces_idx = faces.verts_idx.to(device)
+    verts = verts.to(device)
+
+    # target mesh
+    target_mesh = create_mesh(verts, faces_idx)
+
     for i in trange(start_iter, cfg.experiment.train_iters):
 
         model_coarse.train()
@@ -191,7 +227,7 @@ def main():
             target_ray_values = target_ray_values[select_inds].to(device)
             # ray_bundle = torch.stack([ray_origins, ray_directions], dim=0).to(device)
 
-            rgb_coarse, _, _, rgb_fine, _, _ = run_one_iter_of_nerf(
+            rgb_coarse, _, _, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
                 cache_dict["height"],
                 cache_dict["width"],
                 cache_dict["focal_length"],
@@ -224,7 +260,7 @@ def main():
             target_s = img_target[select_inds[:, 0], select_inds[:, 1], :]
 
             then = time.time()
-            rgb_coarse, _, _, rgb_fine, _, _ = run_one_iter_of_nerf(
+            rgb_coarse, _, _, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
                 H,
                 W,
                 focal,
@@ -247,15 +283,12 @@ def main():
             fine_loss = torch.nn.functional.mse_loss(
                 rgb_fine[..., :3], target_ray_values[..., :3]
             )
-        # loss = torch.nn.functional.mse_loss(rgb_pred[..., :3], target_s[..., :3])
-        loss = 0.0
-        # if fine_loss is not None:
-        #     loss = fine_loss
-        # else:
-        #     loss = coarse_loss
+
         loss = coarse_loss + (fine_loss if fine_loss is not None else 0.0)
         loss.backward()
+
         psnr = mse2psnr(loss.item())
+
         optimizer.step()
         optimizer.zero_grad()
 
@@ -299,7 +332,7 @@ def main():
                 if USE_CACHED_DATASET:
                     datafile = np.random.choice(validation_paths)
                     cache_dict = torch.load(datafile)
-                    rgb_coarse, _, _, rgb_fine, _, _ = run_one_iter_of_nerf(
+                    rgb_coarse, _, _, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
                         cache_dict["height"],
                         cache_dict["width"],
                         cache_dict["focal_length"],
@@ -320,7 +353,7 @@ def main():
                     ray_origins, ray_directions = get_ray_bundle(
                         H, W, focal, pose_target
                     )
-                    rgb_coarse, _, _, rgb_fine, _, _ = run_one_iter_of_nerf(
+                    rgb_coarse, _, _, _, rgb_fine, _, _, _ = run_one_iter_of_nerf(
                         H,
                         W,
                         focal,
@@ -335,13 +368,30 @@ def main():
                     )
                     target_ray_values = img_target
                 coarse_loss = img2mse(rgb_coarse[..., :3], target_ray_values[..., :3])
-                loss, fine_loss = 0.0, 0.0
+                loss, fine_diffuse_loss, fine_chamfer_loss = 0.0, 0.0, 0.0
+
+                # Chamfer Loss
+                # Read the input 3D model
+                vertices, faces, _, _, _, _ = extract_geometry(model_fine, encode_position_fn, encode_direction_fn)
+
+                # Move to the available device
+                verts, faces_idx = vertices.to(device), faces.to(device)
+
+                # We construct a Meshes structure for the target mesh
+                input_mesh = create_mesh(verts, faces_idx)
+
+                # Sparse sampling
+                sample_trg = sample_points_from_meshes(target_mesh, 1600)
+                sample_pred = sample_points_from_meshes(input_mesh, 1600)
+
+                fine_chamfer_loss, _ = chamfer_distance(sample_trg, sample_pred)
+
+                loss = coarse_loss
                 if rgb_fine is not None:
-                    fine_loss = img2mse(rgb_fine[..., :3], target_ray_values[..., :3])
-                    loss = fine_loss
-                else:
-                    loss = coarse_loss
-                loss = coarse_loss + fine_loss
+                    fine_diffuse_loss = img2mse(rgb_fine[..., :3], target_ray_values[..., :3])
+                    fine_loss = fine_diffuse_loss
+                    loss += fine_loss
+
                 psnr = mse2psnr(loss.item())
                 writer.add_scalar("validation/loss", loss.item(), i)
                 writer.add_scalar("validation/coarse_loss", coarse_loss.item(), i)
@@ -362,6 +412,10 @@ def main():
                 tqdm.write(
                     "Validation loss: "
                     + str(loss.item())
+                    + "Validation diffuse loss: "
+                    + str(fine_diffuse_loss)
+                    + "Validation chamfer loss: "
+                    + str(fine_chamfer_loss)
                     + " Validation PSNR: "
                     + str(psnr)
                     + " Time: "

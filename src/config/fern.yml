@@ -3,7 +3,7 @@ experiment:
   # Unique experiment identifier
   id: fern
   # Experiment logs will be stored at "logdir"/"id"
-  logdir: logs
+  logdir: ../logs
   # Seed for random number generators (for repeatability).
   randomseed: 34  # 8239
   # Number of training iterations.

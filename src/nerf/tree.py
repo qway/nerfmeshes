@@ -58,15 +58,15 @@ class TreeSampling:
     ]
 
     colors_tensor = torch.as_tensor([
-        [255, 0, 0],
-        [0, 255, 0],
-        [0, 0, 255],
-        [255, 255, 0],
-        [0, 255, 255],
-        [255, 0, 255],
-        [128, 64, 64],
-        [64, 64, 128],
-    ], dtype = torch.int).unsqueeze(0)
+        [0, 0, 0],
+        [128, 128, 128],
+        [128, 128, 128],
+        [128, 128, 128],
+        [0, 0, 0],
+        [128, 128, 128],
+        [0, 0, 0],
+        [128, 128, 128],
+    ], dtype=torch.int).unsqueeze(0)
 
     def __init__(self, config, device):
         self.config = config

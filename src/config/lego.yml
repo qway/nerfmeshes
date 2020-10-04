@@ -3,17 +3,19 @@ experiment:
   # Unique experiment identifier
   id: lego-lowres3
   # Experiment logs will be stored at "logdir"/"id"
-  logdir: logs
+  logdir: ../logs
   # Seed for random number generators (for repeatability).
   randomseed: 42
   # Number of training iterations.
   train_iters: 200000
   # Number of training iterations after which to validate.
-  validate_every: 10000
+  validate_every: 100
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
   print_every: 100
+  # Base directory of mesh dataset.
+  meshdir: ../data/meshes
 
 # Tree parameters.
 tree:
@@ -26,7 +28,7 @@ tree:
   # Max tree depth, higher requires more memory
   max_depth: 4
   # Threshold weight for pruning
-  eps: 0.005
+  eps: 0.001
   # Voxel random sampling instead of linearly non-randomly
   use_voxel_random_sampling: True
   # Depth random sampling instead of linearly non-randomly
