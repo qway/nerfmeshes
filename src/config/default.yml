@@ -40,8 +40,8 @@ models:
     # perceptron).
     hidden_size: 128
     # Add a skip connection once in a while. Note: This parameter
-    # won't take affect unless num_layers > skip_connect_every.
-    skip_connect_every: 4
+    # won't take affect unless num_layers > skip_step.
+    skip_step: 4
     # Number of encoding functions to use (Eg. in positional encoding).
     num_encoding_functions: 6
     # Additionally use viewing directions as input.
@@ -55,8 +55,8 @@ models:
     # perceptron).
     hidden_size: 128
     # Add a skip connection once in a while. Note: This parameter
-    # won't take affect unless num_layers > skip_connect_every.
-    skip_connect_every: 4
+    # won't take affect unless num_layers > skip_step.
+    skip_step: 4
     # Number of encoding functions to use (Eg. in positional encoding).
     num_encoding_functions: 6
     # Additionally use viewing directions as input.

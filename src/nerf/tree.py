@@ -72,21 +72,23 @@ class TreeSampling:
         self.config = config
         self.device = device
 
-        # initial bounds, normalized
+        # Initial bounds, normalized
         self.ray_near, self.ray_far = self.config.dataset.near, self.config.dataset.far
         self.ray_mean = (self.ray_near + self.ray_far) / 2
         bounds = torch.tensor([self.ray_near - self.ray_mean] * 3), torch.tensor([self.ray_far - self.ray_mean] * 3)
 
-        # tree root
+        # Tree root
         self.root = Node(self.config, bounds, 0)
         self.root.subdivide()
 
-        # tree residual data
+        # Tensor (Nx2x3) whose elements define the min/max bounds.
         self.voxels = None
+
+        # Tree residual data
         self.memm = None
         self.counter = 1
 
-        # initialize
+        # Initialize
         self.consolidate()
 
     def flatten(self):
@@ -213,10 +215,9 @@ class TreeSampling:
 
         return samples
 
-    def batch_ray_voxel_intersect(self, bounds, origins, dirs, samples_count = 64, verbose = False):
+    def batch_ray_voxel_intersect(self, origins, dirs, samples_count = 64):
         """ Returns batch of min and max intersections with their indices.
         Args:
-            bounds (torch.Tensor): Tensor (Nx2x3) whose elements define the min/max bounds.
             origins (torch.Tensor): Tensor (Rx3) whose elements define the ray origin positions.
             dirs (torch.Tensor): Tensor (Rx3) whose elements define the ray directions.
 
@@ -225,6 +226,7 @@ class TreeSampling:
             indices (torch.Tensor): indices of valid intersections
         """
         assert origins.shape[0] == dirs.shape[0], "Batch ray size not consistent"
+        bounds = self.voxels
         rays_count, voxels_count = origins.shape[0], bounds.shape[0],
 
         inv_dirs = 1 / dirs

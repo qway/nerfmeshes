@@ -1,5 +1,7 @@
 import torch
-import math
+import numpy as np
+import torchvision
+
 from typing import Optional
 
 
@@ -11,7 +13,114 @@ def mse2psnr(mse):
     # For numerical stability, avoid a zero mse loss.
     if mse == 0:
         mse = 1e-5
-    return -10.0 * math.log10(mse)
+
+    return -10.0 * torch.log10(mse)
+
+
+def compute_psnr(tensor, loss):
+    maxx = torch.max(tensor)
+
+    # For numerical stability, avoid a zero mse loss.
+    if loss == 0:
+        loss = 1e-5
+
+    return 10 * torch.log10(maxx ** 2 / loss)
+
+
+def get_point_cloud_sample(ray_origins, ray_directions, depth_output, dep_target):
+    mask = dep_target > 0
+    vertices_output_empty = (ray_origins[~mask] + ray_directions[~mask] * depth_output[~mask][..., None]).view(-1, 3)
+    vertices_output_space = (ray_origins[mask] + ray_directions[mask] * depth_output[mask][..., None]).view(-1, 3)
+    vertices_target = (ray_origins + ray_directions * dep_target[..., None]).view(-1, 3)
+    vertices = torch.cat((vertices_output_empty, vertices_output_space, vertices_target), dim = 0)
+    diffuse_output_empty = torch.zeros_like(vertices_output_empty)
+    diffuse_output_empty[:, 1] = 255.
+    diffuse_output_space = torch.zeros_like(vertices_output_space)
+    diffuse_output_space[:, 0] = 255.
+    diffuse_target = torch.zeros_like(vertices_target)
+    diffuse_target[:, 2] = 255.
+    diffuse = torch.cat((diffuse_output_empty, diffuse_output_space, diffuse_target), dim = 0)
+    normals = torch.cat((-ray_directions.view(-1, 3), -ray_directions.view(-1, 3)), dim = 0)
+    return vertices, diffuse, normals
+
+
+def comp_depth(depth_output, depth_target, options):
+    mask = depth_target > options.dataset.empty
+    depth_loss = torch.nn.functional.mse_loss(
+        depth_output, depth_target
+    )
+
+    depth_empty = torch.nn.functional.mse_loss(
+        depth_output[~mask], depth_target[~mask]
+    )
+
+    depth_space = torch.nn.functional.mse_loss(
+        depth_output[mask], depth_target[mask]
+    )
+
+    depth_l1 = (depth_output[mask] - depth_target[mask]).mean()
+
+    return depth_loss, depth_empty, depth_space, depth_l1
+
+
+def export_obj(vertices, triangles, diffuse, normals, filename):
+    """
+    Exports a mesh in the (.obj) format.
+    """
+    print('Writing to obj...')
+
+    with open(filename, "w") as fh:
+
+        for index, v in enumerate(vertices):
+            fh.write("v {} {} {}".format(*v))
+            if len(diffuse) > index:
+                fh.write(" {} {} {}".format(*diffuse[index]))
+
+            fh.write("\n")
+
+        for n in normals:
+            fh.write("vn {} {} {}\n".format(*n))
+
+        for f in triangles:
+            fh.write("f")
+            for index in f:
+                fh.write(" {}//{}".format(index + 1, index + 1))
+
+            fh.write("\n")
+
+    print('Finished writing to obj')
+
+
+def export_point_cloud(it, ray_origins, ray_directions, depth_fine, dep_target):
+    vertices_output = (ray_origins + ray_directions * depth_fine[..., None]).view(-1, 3)
+    vertices_target = (ray_origins + ray_directions * dep_target[..., None]).view(-1, 3)
+    vertices = torch.cat((vertices_output, vertices_target), dim = 0)
+    diffuse_output = torch.zeros_like(vertices_output)
+    diffuse_output[:, 0] = 1.0
+    diffuse_target = torch.zeros_like(vertices_target)
+    diffuse_target[:, 2] = 1.0
+    diffuse = torch.cat((diffuse_output, diffuse_target), dim = 0)
+    normals = torch.cat((-ray_directions.view(-1, 3), -ray_directions.view(-1, 3)), dim = 0)
+    export_obj(vertices, [], diffuse, normals, f"{it:04d}.obj")
+
+
+def cast_to_image(tensor):
+    # Input tensor is (H, W, 3). Convert to (3, H, W).
+    tensor = tensor.permute(2, 0, 1)
+    # Conver to PIL Image and then np.array (output shape: (H, W, 3))
+    img = np.array(torchvision.transforms.ToPILImage()(tensor.detach().cpu().float()))
+    # Map back to shape (3, H, W), as tensorboard needs channels first.
+    img = np.moveaxis(img, [-1], [0])
+    return img
+
+
+def cast_to_disparity_image(tensor):
+    # Input tensor is (H, W). Convert to (1, H, W).
+    img = (tensor - tensor.min()) / (tensor.max() - tensor.min())
+    img = img.clamp(0, 1) * 255
+    img = img.unsqueeze(0).numpy().astype(np.uint8)
+    img = img.detach().cpu()
+    return img
 
 
 def get_minibatches(inputs: torch.Tensor, chunksize: Optional[int] = 1024 * 8):
@@ -19,11 +128,11 @@ def get_minibatches(inputs: torch.Tensor, chunksize: Optional[int] = 1024 * 8):
     Each element of the list (except possibly the last) has dimension `0` of length
     `chunksize`.
     """
-    return [inputs[i : i + chunksize] for i in range(0, inputs.shape[0], chunksize)]
+    return [inputs[i: i + chunksize] for i in range(0, inputs.shape[0], chunksize)]
 
 
 def meshgrid_xy(
-    tensor1: torch.Tensor, tensor2: torch.Tensor
+        tensor1: torch.Tensor, tensor2: torch.Tensor
 ) -> (torch.Tensor, torch.Tensor):
     """Mimick np.meshgrid(..., indexing="xy") in pytorch. torch.meshgrid only allows "ij" indexing.
     (If you're unsure what this means, safely skip trying to understand this, and run a tiny example!)
@@ -67,63 +176,63 @@ def cumprod_exclusive(tensor: torch.Tensor) -> torch.Tensor:
 
 
 def get_ray_bundle(
-    height: int, width: int, focal_length: float, tform_cam2world: torch.Tensor, depth_map: torch.Tensor = None
+        height: int,
+        width: int,
+        focal_length: float,
+        tform_cam2world: torch.Tensor
 ):
-    r"""Compute the bundle of rays passing through all pixels of an image (one ray per pixel).
-
+    """ Compute the bundle of rays passing through all pixels of an image (one ray per pixel).
     Args:
-    height (int): Height of an image (number of pixels).
-    width (int): Width of an image (number of pixels).
-    focal_length (float or torch.Tensor): Focal length (number of pixels, i.e., calibrated intrinsics).
-    tform_cam2world (torch.Tensor): A 6-DoF rigid-body transform (shape: :math:`(4, 4)`) that
-      transforms a 3D point from the camera frame to the "world" frame for the current example.
-    depth_map (torch.Tensor): Depth (W x H) for each individual pixel
-
+        height (int): Height of an image (number of pixels).
+        width (int): Width of an image (number of pixels).
+        focal_length (float or torch.Tensor): Focal length (number of pixels, i.e., calibrated intrinsics).
+        tform_cam2world (torch.Tensor): A 6-DoF rigid-body transform (shape: :math:`(4, 4)`) that
+          transforms a 3D point from the camera frame to the "world" frame for the current example.
     Returns:
-    ray_origins (torch.Tensor): A tensor of shape :math:`(width, height, 3)` denoting the centers of
-      each ray. `ray_origins[i][j]` denotes the origin of the ray passing through pixel at
-      row index `j` and column index `i`.
-      (TODO: double check if explanation of row and col indices convention is right).
-    ray_directions (torch.Tensor): A tensor of shape :math:`(width, height, 3)` denoting the
-      direction of each ray (a unit vector). `ray_directions[i][j]` denotes the direction of the ray
-      passing through the pixel at row index `j` and column index `i`.
-      (TODO: double check if explanation of row and col indices convention is right).
+        ray_origins (torch.Tensor): A tensor of shape :math:`(width, height, 3)` denoting the centers of
+          each ray. `ray_origins[i][j]` denotes the origin of the ray passing through pixel at
+          row index `j` and column index `i`.
+        ray_directions (torch.Tensor): A tensor of shape :math:`(width, height, 3)` denoting the
+          direction of each ray (a unit vector). `ray_directions[i][j]` denotes the direction of the ray
+          passing through the pixel at row index `j` and column index `i`.
     """
-    # TESTED
     ii, jj = meshgrid_xy(
         torch.arange(
-            width, dtype=tform_cam2world.dtype, device=tform_cam2world.device
+            width, dtype = tform_cam2world.dtype, device = tform_cam2world.device
         ).to(tform_cam2world),
         torch.arange(
-            height, dtype=tform_cam2world.dtype, device=tform_cam2world.device
+            height, dtype = tform_cam2world.dtype, device = tform_cam2world.device
         ),
     )
 
-    # (W, H, 3)
+    # Directions shape (W, H, 3)
     directions = torch.stack(
         [
             (ii - width * 0.5) / focal_length,
             -(jj - height * 0.5) / focal_length,
             -torch.ones_like(ii),
         ],
-        dim=-1,
+        dim = -1,
     )
 
     # Normalized rays, spherical / pinhole camera
     directions_norm = directions / directions.norm(2, dim = -1)[..., None]
 
-    # (W, H, 1, 3) * (3, 3) => (W, H, 3, 3) => (W, H, 3)
+    # Ray directions (W, H, 1, 3) @ (3, 3) => (W, H, 3, 3) => (W, H, 3)
     ray_directions = torch.sum(
-        directions_norm[..., None, :] * tform_cam2world[:3, :3], dim=-1
+        directions_norm[..., None, :] * tform_cam2world[:3, :3], dim = -1
     )
 
-    ray_origins = tform_cam2world[:3, -1].expand(ray_directions.shape)
+    # Ray origins (3,) => (1, 3)
+    ray_origins = tform_cam2world[:3, -1]
 
     return ray_origins, ray_directions
 
 
 def positional_encoding(
-    tensor, num_encoding_functions=6, include_input=True, log_sampling=True
+        tensor, num_encoding_functions = 6,
+        include_input = True,
+        log_sampling = True
 ) -> torch.Tensor:
     r"""Apply positional encoding to the input.
 
@@ -146,16 +255,16 @@ def positional_encoding(
             0.0,
             num_encoding_functions - 1,
             num_encoding_functions,
-            dtype=tensor.dtype,
-            device=tensor.device,
+            dtype = tensor.dtype,
+            device = tensor.device,
         )
     else:
         frequency_bands = torch.linspace(
             2.0 ** 0.0,
             2.0 ** (num_encoding_functions - 1),
             num_encoding_functions,
-            dtype=tensor.dtype,
-            device=tensor.device,
+            dtype = tensor.dtype,
+            device = tensor.device,
         )
 
     for freq in frequency_bands:
@@ -166,11 +275,11 @@ def positional_encoding(
     if len(encoding) == 1:
         return encoding[0]
     else:
-        return torch.cat(encoding, dim=-1)
+        return torch.cat(encoding, dim = -1)
 
 
 def get_embedding_function(
-    num_encoding_functions=6, include_input=True, log_sampling=True
+        num_encoding_functions = 6, include_input = True, log_sampling = True
 ):
     r"""Returns a lambda function that internally calls positional_encoding.
     """
@@ -192,14 +301,14 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
     o2 = 1.0 + 2.0 * near / rays_o[..., 2]
 
     d0 = (
-        -1.0
-        / (W / (2.0 * focal))
-        * (rays_d[..., 0] / rays_d[..., 2] - rays_o[..., 0] / rays_o[..., 2])
+            -1.0
+            / (W / (2.0 * focal))
+            * (rays_d[..., 0] / rays_d[..., 2] - rays_o[..., 0] / rays_o[..., 2])
     )
     d1 = (
-        -1.0
-        / (H / (2.0 * focal))
-        * (rays_d[..., 1] / rays_d[..., 2] - rays_o[..., 1] / rays_o[..., 2])
+            -1.0
+            / (H / (2.0 * focal))
+            * (rays_d[..., 1] / rays_d[..., 2] - rays_o[..., 1] / rays_o[..., 2])
     )
     d2 = -2.0 * near / rays_o[..., 2]
 
@@ -228,10 +337,10 @@ def gather_cdf_util(cdf, inds):
     cdf_flat = [
         cdf_chunk.reshape([1] + list(orig_inds_shape[1:])) for cdf_chunk in cdf_flat
     ]
-    return torch.cat(cdf_flat, dim=0)
+    return torch.cat(cdf_flat, dim = 0)
 
 
-def sample_pdf(bins, weights, num_samples, det=False):
+def sample_pdf(bins, weights, num_samples, det = False):
     # TESTED (Carefully, line-to-line).
     # But chances of bugs persist; haven't integration-tested with
     # training routines.
@@ -251,7 +360,6 @@ def sample_pdf(bins, weights, num_samples, det=False):
 
     # Invert CDF
     inds = torch.searchsorted(cdf.contiguous().detach(), u.contiguous().detach(), side="right")
-
     below = torch.max(torch.zeros_like(inds), inds - 1)
     above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
     inds_g = torch.stack((below, above), -1)
@@ -268,29 +376,29 @@ def sample_pdf(bins, weights, num_samples, det=False):
     return samples
 
 
-def sample_pdf_2(bins, weights, num_samples, det=False):
+def sample_pdf_2(bins, weights, num_samples, det = False):
     r"""sample_pdf function from another concurrent pytorch implementation
     by yenchenlin (https://github.com/yenchenlin/nerf-pytorch).
     """
 
     weights = weights + 1e-5
-    pdf = weights / torch.sum(weights, dim=-1, keepdim=True)
-    cdf = torch.cumsum(pdf, dim=-1)
+    pdf = weights / torch.sum(weights, dim = -1, keepdim = True)
+    cdf = torch.cumsum(pdf, dim = -1)
     cdf = torch.cat(
-        [torch.zeros_like(cdf[..., :1]), cdf], dim=-1
+        [torch.zeros_like(cdf[..., :1]), cdf], dim = -1
     )  # (batchsize, len(bins))
 
     # Take uniform samples
     if det:
         u = torch.linspace(
-            0.0, 1.0, steps=num_samples, dtype=weights.dtype, device=weights.device
+            0.0, 1.0, steps = num_samples, dtype = weights.dtype, device = weights.device
         )
         u = u.expand(list(cdf.shape[:-1]) + [num_samples])
     else:
         u = torch.rand(
             list(cdf.shape[:-1]) + [num_samples],
-            dtype=weights.dtype,
-            device=weights.device,
+            dtype = weights.dtype,
+            device = weights.device,
         )
 
     # Invert CDF
@@ -299,7 +407,7 @@ def sample_pdf_2(bins, weights, num_samples, det=False):
     inds = torch.searchsorted(cdf, u, right = True)
     below = torch.max(torch.zeros_like(inds - 1), inds - 1)
     above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
-    inds_g = torch.stack((below, above), dim=-1)  # (batchsize, num_samples, 2)
+    inds_g = torch.stack((below, above), dim = -1)  # (batchsize, num_samples, 2)
 
     matched_shape = (inds_g.shape[0], inds_g.shape[1], cdf.shape[-1])
     cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
@@ -313,8 +421,8 @@ def sample_pdf_2(bins, weights, num_samples, det=False):
     return samples
 
 
-if __name__ == "__main__":
 
+if __name__ == "__main__":
     # # meshgrid_xy
     # i, j = np.meshgrid(np.arange(3), np.arange(4, 7), indexing='xy')
     # print(i)
