@@ -112,7 +112,6 @@ class LoggerCallback(Callback):
 
     def on_validation_start(self, trainer, pl_module):
         """Called when the validation loop begins."""
-
         global_step = self.get_global_step(trainer)
 
         self.val_pb.reset()

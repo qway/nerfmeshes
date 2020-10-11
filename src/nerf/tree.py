@@ -157,7 +157,10 @@ class TreeSampling:
             print(f"Now {len(children)} voxels")
             self.root.children = children
 
-        self.voxels = [torch.stack(node.bounds, 0) for node in self.root.children]
+        self.voxels = [ torch.stack(node.bounds, 0) for node in self.root.children ]
+        if len(self.voxels) == 0:
+            print(f"The chosen threshold {self.config.tree.eps} was set too high!")
+
         self.voxels = torch.stack(self.voxels, 0).to(self.device)
         self.memm = torch.zeros(self.voxels.shape[0], ).to(self.device)
         self.counter = 1
@@ -190,7 +193,7 @@ class TreeSampling:
         mask = freq > 0
 
         # distribute weights (voxel/accumulations) while being numerically stable
-        self.memm[mask] = self.memm[mask] + (acc[mask] / freq[mask] - self.memm[mask]) / self.counter
+        self.memm[mask] += (acc[mask] / freq[mask] - self.memm[mask]) / self.counter
         self.counter += 1
 
     def extract_(self, bounds, signs):
@@ -218,16 +221,15 @@ class TreeSampling:
     def batch_ray_voxel_intersect(self, origins, dirs, samples_count = 64):
         """ Returns batch of min and max intersections with their indices.
         Args:
-            origins (torch.Tensor): Tensor (Rx3) whose elements define the ray origin positions.
+            origins (torch.Tensor): Tensor (1x3) whose elements define the ray origin positions.
             dirs (torch.Tensor): Tensor (Rx3) whose elements define the ray directions.
 
         Returns:
             intersections (torch.Tensor): min/max intersections ray direction scalars
             indices (torch.Tensor): indices of valid intersections
         """
-        assert origins.shape[0] == dirs.shape[0], "Batch ray size not consistent"
         bounds = self.voxels
-        rays_count, voxels_count = origins.shape[0], bounds.shape[0],
+        rays_count, voxels_count = dirs.shape[0], bounds.shape[0],
 
         inv_dirs = 1 / dirs
         signs = (inv_dirs < 0).long()
@@ -304,8 +306,6 @@ class TreeSampling:
             z_vals = values_min + (values_max - values_min) * value_samples
         else:
             # deterministic sampling (not the most efficient one)
-            # minxx = torch.max(values_min.min(-1).values, torch.tensor(self.ray_near, device = bounds.device).float())
-            # maxxx = torch.min(values_max.max(-1).values, torch.tensor(self.ray_far, device = bounds.device).float())
             minxx = values_min.min(-1).values
             maxxx = values_max.max(-1).values
 
@@ -317,22 +317,18 @@ class TreeSampling:
 
         return z_vals, indices, intersections, ray_mask
 
+    def serialize(self):
+        return {
+            "root": self.root,
+            "voxels": self.voxels,
+            "memm": self.memm,
+            "counter": self.counter
+        }
 
-def create_scene(data):
-    vertices = []
-    faces = []
-    colors = []
+    def deserialize(self, dict):
+        print("Loaded tree from checkpoint...")
+        self.root = dict["root"]
+        self.voxels = dict["voxels"].to(self.device)
+        self.memm = dict["memm"].to(self.device)
+        self.counter = dict["counter"]
 
-    acc = 0
-    for component in data:
-        vertices.append(component[0])
-        faces.append(component[1] + acc)
-        colors.append(component[2])
-
-        acc += component[0].shape[0]
-
-    vertices = torch.cat(vertices, 0)
-    faces = torch.cat(faces, 0)
-    colors = torch.cat(colors, 0)
-
-    return vertices, faces, colors

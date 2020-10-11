@@ -9,18 +9,18 @@ import time
 
 from mesh_nerf import create_mesh
 from pytorch3d.io import load_obj
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from tqdm import trange
-from enum import Enum, auto
+from enum import Enum
 from pathlib import Path
 from torch.utils.data import Dataset
 
-from data.load_blender import load_blender_data
-from data.load_colmap import read_model
-from data.load_llff import load_llff_data
-from data.load_scannet import SensorData
+from data.loaders.load_blender import load_blender_data
+from data.loaders.load_colmap import read_model
+from data.loaders.load_llff import load_llff_data
 from nerf import get_ray_bundle, meshgrid_xy
 from data import batch_random_sampling, pose_spherical
+from data.data_helpers import DataBundle
 
 
 class DatasetType(Enum):
@@ -48,19 +48,18 @@ def dummy_rays_simple_radial(height: int, width: int, camera, resolution):
 
 
 def convert_poses_to_rays(poses, H, W, focal):
-    all_ray_origins = []
-    all_ray_directions = []
+    ray_origins = []
+    ray_directions = []
     for pose in poses:
-        pose_target = pose[:3, :4]
-        ray_origins, ray_directions = get_ray_bundle(H, W, focal, pose_target)
+        chunk_ray_origins, chunk_ray_directions = get_ray_bundle(H, W, focal, pose)
 
-        all_ray_origins.append(ray_origins)
-        all_ray_directions.append(ray_directions)
+        ray_origins.append(chunk_ray_origins)
+        ray_directions.append(chunk_ray_directions)
 
-    all_ray_origins = torch.stack(all_ray_origins, 0)
-    all_ray_directions = torch.stack(all_ray_directions, 0)
+    ray_origins = torch.stack(ray_origins, 0)
+    ray_directions = torch.stack(ray_directions, 0)
 
-    return all_ray_directions, all_ray_origins
+    return ray_origins, ray_directions
 
 
 def get_rays(H, W, camera, poses, camera_model = "SIMPLE_RADIAL", resolution = 1.0):
@@ -85,6 +84,7 @@ def get_rays(H, W, camera, poses, camera_model = "SIMPLE_RADIAL", resolution = 1
 class SynthesizableDataset(Dataset):
 
     def __init__(self, cfg, type):
+        super(SynthesizableDataset, self).__init__(cfg, type)
         self.cfg, self.type = cfg, type
 
         # Synthetic mesh target
@@ -116,13 +116,20 @@ class SynthesizableDataset(Dataset):
 class CachingDataset(Dataset):
 
     def __init__(self, cfg, type):
+        super(CachingDataset, self).__init__()
         assert type in DatasetType.__members__.values(), f"Invalid dataset type {type} expected {list(DatasetType.__members__.keys())}"
 
         self.cfg, self.type = cfg, type
         self.shuffle = True
-        self.H, self.W, self.focal = None, None, None
-        self.ray_origins, self.ray_directions, self.ray_targets = None, None, None
-        self.ray_bounds = torch.tensor([ self.cfg.dataset.near, self.cfg.dataset.far ])
+
+        # Empty data bundle
+        self.data_bundle = None
+
+        # Dataset filters
+        self.filters = [ "ray_origins", "ray_directions", "ray_targets", "ray_bounds", "target_depth", "size", "hwf" ]
+
+        # Default experiment ray bounds
+        self.ray_bounds = torch.tensor([ self.cfg.dataset.near, self.cfg.dataset.far ]).float()
         self.num_random_rays = self.cfg.nerf.train.num_random_rays
 
         # Cached dataset path
@@ -133,69 +140,73 @@ class CachingDataset(Dataset):
         start_time = time.time()
         if self.cfg.dataset.caching.use_caching:
             # Dataset path
-            cache_dir = self.cfg.dataset.caching.cache_dir
-            cache_dir_exists = os.path.exists(cache_dir)
+            cache_dir_exists = os.path.exists(self.path)
             if not cache_dir_exists:
-                print(f"The path ${cache_dir} does not exist, creating one...")
+                print(f"The path ${self.path} does not exist, creating one...")
 
                 # Create dataset directory
                 os.makedirs(self.path, exist_ok = True)
 
-            message = "overriding" if self.cfg.dataset.caching.override_caching and cache_dir_exists else "creating"
-            print(f"Caching the dataset to {self.path} by {message}...")
             if self.cfg.dataset.caching.override_caching or not cache_dir_exists:
+                if cache_dir_exists:
+                    print(f"Overriding the cached dataset to {self.path}...")
+                else:
+                    print(f"Creating the cached dataset to {self.path}...")
+
                 self.cache_dataset()
+            else:
+                print(f"Using existent cached dataset from {self.path}...")
 
-            self.paths = glob.glob(os.path.join(cache_dir, self.type.value, "*.data"))
+            self.paths = glob.glob(os.path.join(self.path, "*.data"))
+            if len(self.paths) == 0:
+                if cache_dir_exists:
+                    print(f"The previous cached dataset is corrupted in {self.path}, overriding it...")
+                    self.cache_dataset()
+
+            self.paths = glob.glob(os.path.join(self.path, "*.data"))
+            assert len(self.paths) > 0, f"There is a critical issue when caching the dataset"
+
             self.init_sampling(torch.load(self.paths[0])['hwf'])
+            size = len(self.paths)
         else:
-            images, poses, hwf, bounds = self.load_dataset()
+            bundle = self.load_dataset()
 
-            self.init_sampling(hwf)
-            if bounds is not None:
-                self.ray_bounds = bounds
-
-            self.ray_directions, self.ray_origins = convert_poses_to_rays(
-                poses, self.H, self.W, self.focal
+            self.init_sampling(bundle.hwf)
+            self.data_bundle.ray_origins, self.data_bundle.ray_directions = convert_poses_to_rays(
+                bundle.poses, self.H, self.W, self.focal
             )
 
-            self.ray_targets = torch.from_numpy(images)
-            if self.shuffle:
-                shuffled_indices = np.arange(self.ray_targets.shape[0])
-                np.random.shuffle(shuffled_indices)
-                self.ray_targets = self.ray_targets[shuffled_indices]
-                self.ray_directions = self.ray_directions[shuffled_indices]
-                self.ray_origins = self.ray_origins[shuffled_indices]
+            size = bundle.size
+
+            # if self.shuffle:
+            #     shuffled_indices = np.arange(self.data_bundle.ray_targets.shape[0])
+            #     np.random.shuffle(shuffled_indices)
+            #
+            #     for field in fields(self.data_bundle):
+            #         setattr(self.data_bundle, field.name, getattr(self.data_bundle, field.name)[shuffled_indices])
 
         time_last = time.time() - start_time
         if self.cfg.dataset.caching.use_caching:
-            print(f"Using cached dataset in {time_last}s seconds...")
+            print(f"Using cached dataset in {time_last}s seconds with {size} assets...")
         else:
             print(f"Load whole dataset into the memory {time_last}s seconds...")
 
     def __len__(self):
-        return len(self.paths) if self.cfg.dataset.caching.use_caching else self.ray_directions.shape[0]
+        return len(self.paths) if self.cfg.dataset.caching.use_caching else self.data_bundle.size
 
     def __getitem__(self, idx):
-        ray_bounds = self.ray_bounds
+        # Retrieve bundle sample
         if self.cfg.dataset.caching.use_caching:
-            path = self.paths[idx]
-            cache_dict = torch.load(path)
-
-            ray_origins, ray_directions, ray_targets = cache_dict['ray_bundle']
+            bundle = DataBundle.deserialize(torch.load(self.paths[idx]))
         else:
-            ray_origins = self.ray_origins[idx]
-            ray_directions = self.ray_directions[idx]
-            ray_targets = self.ray_targets[idx]
-
-            if len(self.ray_bounds.shape) > 1:
-                ray_bounds = self.ray_bounds[idx]
+            bundle = self.data_bundle[idx]
 
         # Random sampling if training
         if self.type != DatasetType.VALIDATION:
-            ray_directions, ray_targets, inds = batch_random_sampling(self.cfg, self.coords, (ray_directions, ray_targets))
+            fn = lambda x: batch_random_sampling(self.cfg, self.coords, x)
+            bundle = bundle.apply(fn, [ "ray_directions", "ray_targets", "target_depth", "target_normals" ])
 
-        return ray_origins, ray_directions, ray_targets, ray_bounds
+        return bundle.serialize(self.filters)
 
     def init_sampling(self, hwf):
         self.H, self.W, self.focal = hwf
@@ -207,15 +218,10 @@ class CachingDataset(Dataset):
             dim = -1,
         ).reshape((-1, 2))
 
-    def save_dataset(self, hwf, ray_bundle, img_idx, batch_idx = -1):
+    def save_dataset(self, bundle: DataBundle, img_idx, batch_idx = -1):
         """
             Script to run and cache a dataset for faster train-eval loops.
         """
-        cache_dict = {
-            "hwf": hwf,
-            "ray_bundle": tuple([ ray_type.detach().cpu() for ray_type in ray_bundle ])
-        }
-
         if batch_idx != -1:
             path = str(img_idx).zfill(4) + str(batch_idx).zfill(4) + ".data"
         else:
@@ -224,14 +230,15 @@ class CachingDataset(Dataset):
         # location for the cached data
         save_path = os.path.join(self.cfg.dataset.caching.cache_dir, self.type.value, path)
 
-        torch.save(cache_dict, save_path)
+        # serialize and save
+        torch.save(bundle.to("cpu").serialize(self.filters), save_path)
 
     @property
     def dataset_path(self):
         return Path(self.cfg.dataset.basedir)
 
     @abstractmethod
-    def load_dataset(self):
+    def load_dataset(self) -> DataBundle:
         pass
 
     @abstractmethod
@@ -246,40 +253,42 @@ class BlenderDataset(SynthesizableDataset, CachingDataset):
     """
 
     def __init__(self, cfg, type = DatasetType.TRAIN):
-        super(SynthesizableDataset, self).__init__(cfg, type)
         super(BlenderDataset, self).__init__(cfg, type)
         print("Loading Blender Data...")
 
+    @property
     def dataset_path(self):
         return Path(self.cfg.dataset.basedir) / f"transforms_{self.type.value}.json"
 
     def load_dataset(self):
-        images, depth_maps, normal_maps, poses, hwf = load_blender_data(self.cfg, self.dataset_path)
+        # Blender data bundle
+        bundle = load_blender_data(self.cfg, self.dataset_path)
 
-        if self.cfg.nerf.train.white_background:
-            images = images * images[..., -1:] + (1.0 - images[..., -1:])
+        if bundle.ray_bounds is None:
+            bundle.ray_bounds = self.ray_bounds
 
-        return images, poses, hwf, None
+        return bundle
 
     def cache_dataset(self):
         # testskip = args.blender_stride TODO(0)
-        images, depth_maps, normal_maps, poses, hwf = load_blender_data(self.cfg, self.dataset_path)
+        # Unpacking blender data
+        bundle = self.load_dataset().to(self.device)
 
         # Coordinates to sample from
-        self.init_sampling(hwf)
+        self.init_sampling(bundle.hwf)
 
-        for img_idx in trange(images.shape[0]):
-            ray_targets = torch.from_numpy(images[img_idx]).to(self.device)
-            pose_target = poses[img_idx, :3, :4].to(self.device)
-            ray_origins, ray_directions = get_ray_bundle(*hwf, pose_target)
+        for img_idx in trange(bundle.size):
+            # Blender data chunk bundle
+            sample = bundle[img_idx]
+            sample.ray_origins, sample.ray_directions = get_ray_bundle(*sample.hwf, sample.poses)
 
             if self.cfg.dataset.caching.sample_all or self.type == DatasetType.VALIDATION:
-                self.save_dataset(hwf, (ray_origins, ray_directions, ray_targets), img_idx)
+                self.save_dataset(sample, img_idx)
             else:
                 for batch_idx in range(self.cfg.dataset.caching.num_variations):
-                    batch_rays = batch_random_sampling(self.cfg, self.coords, (ray_directions, ray_targets))
-
-                    self.save_dataset(hwf, (ray_origins, *batch_rays), img_idx, batch_idx)
+                    fn = lambda x: batch_random_sampling(self.cfg, self.coords, x)
+                    sample = bundle.apply(fn, ["ray_directions", "ray_targets", "target_depth", "target_normals"])
+                    self.save_dataset(sample, img_idx, batch_idx)
 
 
 class ScanNetDataset(Dataset):
@@ -575,18 +584,3 @@ def rays_to_pcloud_string(ray_origin, ray_direction, ray_bounds, ray_target):
 
 def data_set_to_pcloud_string(dataset):
     return "\n".join([rays_to_pcloud_string(*data) for data in dataset])
-
-
-if __name__ == '__main__':
-    # Tests for the ScanNet dataloader
-    dataset = LLFFDataset(
-        "../../data/mountainbike/",
-        num_random_rays = 1000,
-        # stop=10,  # Debug by loading only small part of the dataset
-        downscale_factor = 32
-    )
-
-    pcloud = data_set_to_pcloud_string(dataset)
-
-    if dataset:
-        pass

@@ -1,6 +1,5 @@
 import math
 import torch
-import torchsearchsorted
 
 from nerf import cumprod_exclusive
 
@@ -41,16 +40,15 @@ class VolumeRenderer(torch.nn.Module):
     def __init__(
             self,
             train_radiance_field_noise_std = 0.0,
-            train_white_background = False,
             val_radiance_field_noise_std = 0.0,
-            val_white_background = False,
-            val_attenuation = 1e-3
+            white_background = False,
+            attenuation=1e-3
     ):
         super(VolumeRenderer, self).__init__()
         self.train_radiance_field_noise_std = train_radiance_field_noise_std
-        self.train_white_background = train_white_background
         self.val_radiance_field_noise_std = val_radiance_field_noise_std
-        self.val_white_background = val_white_background
+        self.attenuation = attenuation
+        self.white_background = white_background
         one_e_10 = torch.tensor([1e10])
         one_e_10.requires_grad = False
         self.register_buffer("one_e_10", one_e_10)
@@ -58,10 +56,8 @@ class VolumeRenderer(torch.nn.Module):
     def forward(self, radiance_field, depth_values, ray_directions):
         if self.training:
             radiance_field_noise_std = self.train_radiance_field_noise_std
-            white_background = self.train_white_background
         else:
             radiance_field_noise_std = self.val_radiance_field_noise_std
-            white_background = self.val_white_background
 
         dists = torch.cat(
             (
@@ -87,7 +83,7 @@ class VolumeRenderer(torch.nn.Module):
         alpha = 1.0 - torch.exp(-sigma_a * dists)
 
         weight_attenuation = cumprod_exclusive(1.0 - alpha + 1e-10)
-        mask_weights = (weight_attenuation > self.val_attenuation).float()
+        mask_weights = (weight_attenuation > self.attenuation).float()
         weights = alpha * weight_attenuation
 
         rgb_map = weights[..., None] * rgb
@@ -100,7 +96,7 @@ class VolumeRenderer(torch.nn.Module):
         if not self.training:
             depth_map[acc_map < 1.0] = 0
 
-        if white_background:
+        if self.white_background:
             rgb_map = rgb_map + (1.0 - acc_map[..., None])
 
         return rgb_map, depth_map, weights, mask_weights
@@ -131,32 +127,27 @@ class DensityExtractor(torch.nn.Module):
 
 
 class RaySampleInterval(torch.nn.Module):
-    def __init__(self, cfg, samples_total = 64, lindisp = True, perturb = False):
+    def __init__(self):
         super(RaySampleInterval, self).__init__()
-        self.cfg = cfg
-        self.lindisp = lindisp
-        self.perturb = perturb
-        self.samples_total = samples_total
 
-        point_intervals = torch.linspace(0.0, 1.0, self.samples_total)[None, :]
-        point_intervals.requires_grad = False
-        self.register_buffer("point_intervals", point_intervals)
+    def forward(self, cfg, ray_count, samples_count, near, far):
+        # Ray sample count
+        point_intervals = torch.linspace(0.0, 1.0, samples_count, device = "cuda")[None, :]
 
-    def forward(self, near, far, ray_count):
         # Sample in disparity space, as opposed to in depth space. Sampling in disparity is
         # nonlinear when viewed as depth sampling! (The closer to the camera the more samples)
-        if not self.lindisp:
+        if not cfg.lindisp:
             point_intervals = (
-                    near * (1.0 - self.point_intervals) + far * self.point_intervals
+                    near * (1.0 - point_intervals) + far * point_intervals
             )
         else:
             point_intervals = 1.0 / (
-                    1.0 / near * (1.0 - self.point_intervals)
-                    + 1.0 / far * self.point_intervals
+                    1.0 / near * (1.0 - point_intervals)
+                    + 1.0 / far * point_intervals
             )
 
-        point_intervals = point_intervals.expand([ ray_count, self.samples_total ])
-        if self.perturb:
+        point_intervals = point_intervals.expand([ ray_count, samples_count ])
+        if cfg.perturb:
             # Get intervals between samples.
             mids = 0.5 * (point_intervals[..., 1:] + point_intervals[..., :-1])
             upper = torch.cat((mids, point_intervals[..., -1:]), dim = -1)
@@ -165,12 +156,13 @@ class RaySampleInterval(torch.nn.Module):
             # Stratified samples in those intervals.
             t_rand = torch.rand(
                 point_intervals.shape,
-                dtype = self.point_intervals.dtype,
-                device = self.point_intervals.device,
+                dtype = point_intervals.dtype,
+                device = point_intervals.device,
             )
+
             point_intervals = lower + (upper - lower) * t_rand
 
-        return point_intervals
+        return point_intervals.detach()
 
 
 class SamplePDF(torch.nn.Module):
@@ -215,9 +207,10 @@ class SamplePDF(torch.nn.Module):
             )
 
         # Invert CDF
-        u = u.contiguous()
-        cdf = cdf.contiguous()
-        inds = torchsearchsorted.searchsorted(cdf, u, side = "right")
+        u = u.contiguous().detach()
+        cdf = cdf.contiguous().detach()
+
+        inds = torch.searchsorted(cdf, u, right = True)
         below = torch.max(torch.zeros_like(inds - 1), inds - 1)
         above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
         inds_g = torch.stack((below, above), dim = -1)  # (batchsize, num_samples, 2)

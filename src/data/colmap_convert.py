@@ -8,7 +8,7 @@ import subprocess
 import imageio
 import skimage.transform
 
-from data.load_colmap import read_cameras_binary, read_images_binary, \
+from data.loaders.load_colmap import read_cameras_binary, read_images_binary, \
     read_points3d_binary
 
 
@@ -169,7 +169,6 @@ def minify(basedir, factors=[], resolutions=[]):
     if not needtoload:
         return
 
-    from shutil import copy
     from subprocess import check_output
 
     imgdir = os.path.join(basedir, 'images')

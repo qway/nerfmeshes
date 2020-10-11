@@ -1,7 +1,9 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: lego-lowres3
+  id: lego-buff
+  # Base model, whether to use tree voxel sampling (BuFFModel) instead of hierarchical sampling (NeRFModel)
+  model: BuFFModel
   # Experiment description
   description: This is a human readable description message about the experiment.
   # Experiment logs will be stored at "logdir"/"id"
@@ -9,9 +11,9 @@ experiment:
   # Seed for random number generators (for repeatability).
   randomseed: 42
   # Number of training iterations.
-  train_iters: 200000
+  train_iters: 32000
   # Number of training iterations after which to validate.
-  validate_every: 1000
+  validate_every: 5000
   # Number of training iterations after which to checkpoint.
   save_every: 5000
   # Number of training iterations after which to print progress.
@@ -25,8 +27,6 @@ experiment:
 
 # Tree parameters.
 tree:
-  # Whether to use tree voxel sampling instead of hierarchical sampling
-  use_tree: True
   # Root subdivision power, higher requires more memory
   subdivision_outer_count: 8
   # Tree subdivision power, higher requires more memory
@@ -40,7 +40,7 @@ tree:
   # Depth random sampling instead of linearly non-randomly
   use_depth_random_sampling: True
   # Max tree voxels
-  max_voxel_count: 1024
+  max_voxel_count: 2048
   # Step size before ticking ray batch integration (initially the scene is unresolved)
   step_size_integration_offset: 4000
   # Step size consolidation
@@ -50,15 +50,19 @@ tree:
 logging:
   # Use acronyms for compact logging
   use_acronyms: True
+  # Project 2D points into synthetic world space
+  use_projection: True
+  # Step size for use_projection
+  projection_step_size: 5000
 
 # Dataset parameters.
 dataset:
   # Type of dataset (Blender vs LLFF vs DeepVoxels vs something else)
-  type: llff
+  type: blender
   # Path to the root dir of the chosen dataset.
   basedir: ../data/nerf_synthetic/lego
   # For the Blender dataset (synthetic), implies resolution scale
-  reduced_resolution: null
+  reduced_resolution: 1
   # Stride (include one per "testskip" images in the dataset). Stride length (Blender datasets only).
   # When set to k (k > 1), it samples every kth sample from the dataset.
   testskip: 1
@@ -77,6 +81,8 @@ dataset:
   llff_downsample_factor: 8
   # Determines the hold-out images for LLFF.
   llff_hold_step: 8
+  # Whether to render models using a white background (only for synthetic datasets).
+  white_background: False
   # Caching parameters (works only on Blender, LLFF).
   caching:
     # Use cached dataset, if it's not created, create one.
@@ -86,7 +92,7 @@ dataset:
     # Overrides basedir path to the following pre-cached dataset dir.
     cache_dir: ../data/cache/syn-lego-cache
     # Number of random ray batches to draw per image as infinite data can't be cached.
-    num_variations: 8
+    num_variations: 4
     # Sample all rays for the image and perform ray-batching during runtime.
     # Overrides --num-random-rays and num_variations.
     sample_all: True
@@ -202,8 +208,6 @@ nerf:
     num_coarse: 64
     # Number of depth samples per ray for the fine network.
     num_fine: 64
-    # Whether to render models using a white background (only for synthetic datasets).
-    white_background: False
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
     radiance_field_noise_std: 0.2
@@ -222,8 +226,6 @@ nerf:
     num_coarse: 64
     # Number of depth samples per ray for the fine network.
     num_fine: 64
-    # Whether to render models using a white background (only for synthetic datasets).
-    white_background: False
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
     radiance_field_noise_std: 0.

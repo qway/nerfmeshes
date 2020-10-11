@@ -1,3 +1,7 @@
+from __future__ import annotations
+from dataclasses import astuple, dataclass, field, fields
+from typing import Dict
+
 import torch
 import numpy as np
 import OpenEXR as exr, Imath
@@ -33,19 +37,18 @@ def pose_spherical(theta, phi, radius):
     return c2w
 
 
-def batch_random_sampling(cfg, coords, ray_bundle):
-    # Unpack ray bundle
-    ray_directions, ray_targets = ray_bundle
-
+def batch_random_sampling(cfg, coords, ray_bundle: tuple):
     # Random 2D samples
     select_inds = torch.randperm(coords.shape[0])[:cfg.nerf.train.num_random_rays]
     select_inds = coords[select_inds]
 
-    # Select random sub-samples
-    ray_directions = ray_directions[select_inds[:, 0], select_inds[:, 1], :]
-    ray_targets = ray_targets[select_inds[:, 0], select_inds[:, 1], :]
+    # Unpack ray bundle and select random sub-samples
+    ray_bundle = tuple([
+        ray_batch[select_inds[:, 0], select_inds[:, 1], ...] if ray_batch is not None else None
+        for ray_batch in ray_bundle
+    ])
 
-    return ray_directions, ray_targets, select_inds
+    return ray_bundle
 
 
 def read_depth_from_exr(filename):
@@ -71,3 +74,87 @@ def read_depth_from_exr(filename):
     img = np.concatenate([channelData[channel][..., np.newaxis] for channel in channels], axis = 2)
 
     return img
+
+
+@dataclass
+class DataBundle:
+    ray_origins: torch.Tensor = None
+    ray_directions: torch.Tensor = None
+    ray_targets: torch.Tensor = None
+    ray_bounds: torch.Tensor = None
+    target_depth: torch.Tensor = None
+    target_normals: torch.Tensor = None
+    poses: torch.Tensor = None
+    size: int = -1
+    hwf: tuple = None
+
+    def __iter__(self):
+        return iter(astuple(self))
+
+    def __getitem__(self, keys):
+        if isinstance(keys, int):
+            bundle = DataBundle()
+            for field in fields(self):
+                value = getattr(self, field.name)
+                if value is not None and isinstance(value, torch.Tensor) and value.shape[0] == self.size:
+                    value = value[keys]
+
+                setattr(bundle, field.name, value)
+
+            return bundle
+
+        if not isinstance(keys, tuple):
+            return getattr(self, keys)
+
+        return iter([ getattr(self, k) for k in keys ])
+
+    @staticmethod
+    def deserialize(dict: Dict) -> DataBundle:
+        bundle = DataBundle()
+        for field in fields(bundle):
+            if field.name in dict:
+                setattr(bundle, field.name, dict[field.name])
+
+        return bundle
+
+    def apply(self, func, names) -> DataBundle:
+        rel_names = [ name for name in names if getattr(self, name) is not None ]
+        mapping = [ getattr(self, name) for name in rel_names ]
+        values = func(mapping)
+
+        bundle = DataBundle()
+        for field in fields(self):
+            if field.name in rel_names:
+                setattr(bundle, field.name, values[rel_names.index(field.name)])
+            else:
+                setattr(bundle, field.name, getattr(self, field.name))
+
+        return bundle
+
+    def to_ray_batch(self):
+        """ Removes all unnecessary dimensions from a ray batch. """
+        self.ray_origins = self.ray_origins.view(-1, 3)
+        self.ray_directions = self.ray_directions.view(-1, 3)
+        self.ray_targets = self.ray_targets.view(-1, 3)
+        self.ray_bounds = self.ray_bounds.view(2)
+
+        if self.target_depth is not None:
+            self.target_depth = self.target_depth.view(-1)
+
+        return self
+
+    def to(self, device) -> DataBundle:
+        for field in fields(self):
+            value = getattr(self, field.name)
+            if value is not None and isinstance(value, torch.Tensor):
+                value = value.to(device)
+
+            setattr(self, field.name, value)
+
+        return self
+
+    def serialize(self, filters) -> Dict:
+        return {
+            field.name: getattr(self, field.name) for field in fields(self)
+            if getattr(self, field.name) is not None and field.name in filters
+        }

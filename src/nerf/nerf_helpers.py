@@ -4,6 +4,11 @@ import torchvision
 
 from typing import Optional
 
+POINT_GROUND_TRUTH = torch.tensor([ 0., 0., 255. ])
+POINT_OUT_TRUE = torch.tensor([ 0., 255., 0. ])
+POINT_OUT_FALSE_VOID = torch.tensor([ 0., 0., 0. ])
+POINT_OUT_FALSE_SURFACE = torch.tensor([ 255., 0., 0. ])
+
 
 def img2mse(img_src, img_tgt):
     return torch.nn.functional.mse_loss(img_src, img_tgt)
@@ -14,38 +19,53 @@ def mse2psnr(mse):
     if mse == 0:
         mse = 1e-5
 
+    # MAX(i) is 1.0
     return -10.0 * torch.log10(mse)
 
 
-def compute_psnr(tensor, loss):
-    maxx = torch.max(tensor)
+def get_point_clouds(ray_origins, ray_directions, depth_output, depth_target = None, threshold = 0.2, empty = 0.):
+    # Point cloud to be returned
+    if depth_target is not None:
+        # Target point cloud
+        target_points = create_point_cloud(ray_origins, ray_directions, depth_target, POINT_GROUND_TRUTH)
 
-    # For numerical stability, avoid a zero mse loss.
-    if loss == 0:
-        loss = 1e-5
+        # Compute residuals for inv accuracy (FP + FN) mask
+        mask_true = torch.abs(depth_output - depth_target) < threshold
 
-    return 10 * torch.log10(maxx ** 2 / loss)
+        # Extract only positive samples
+        out_points = create_point_cloud(ray_origins, ray_directions, depth_output, POINT_OUT_TRUE, mask_true)
+
+        # Surface mask
+        mask_surface = (depth_target != empty) & ~mask_true
+        mask_empty = (depth_target == empty) & ~mask_true
+
+        # Extract only negative samples representing void
+        out_points_empty = create_point_cloud(ray_origins, ray_directions, depth_output, POINT_OUT_FALSE_VOID, mask_empty)
+        out_points_surface = create_point_cloud(ray_origins, ray_directions, depth_output, POINT_OUT_FALSE_SURFACE, mask_surface)
+
+        # Bundle them together
+        data = list(zip(target_points, out_points, out_points_empty, out_points_surface))
+        point_cloud = [ torch.cat(type, dim = 0) for type in data ]
+    else:
+        # Output point cloud
+        point_cloud = create_point_cloud(ray_origins, ray_directions, depth_output, POINT_GROUND_TRUTH)
+
+    return point_cloud
 
 
-def get_point_cloud_sample(ray_origins, ray_directions, depth_output, dep_target):
-    mask = dep_target > 0
-    vertices_output_empty = (ray_origins[~mask] + ray_directions[~mask] * depth_output[~mask][..., None]).view(-1, 3)
-    vertices_output_space = (ray_origins[mask] + ray_directions[mask] * depth_output[mask][..., None]).view(-1, 3)
-    vertices_target = (ray_origins + ray_directions * dep_target[..., None]).view(-1, 3)
-    vertices = torch.cat((vertices_output_empty, vertices_output_space, vertices_target), dim = 0)
-    diffuse_output_empty = torch.zeros_like(vertices_output_empty)
-    diffuse_output_empty[:, 1] = 255.
-    diffuse_output_space = torch.zeros_like(vertices_output_space)
-    diffuse_output_space[:, 0] = 255.
-    diffuse_target = torch.zeros_like(vertices_target)
-    diffuse_target[:, 2] = 255.
-    diffuse = torch.cat((diffuse_output_empty, diffuse_output_space, diffuse_target), dim = 0)
-    normals = torch.cat((-ray_directions.view(-1, 3), -ray_directions.view(-1, 3)), dim = 0)
+def create_point_cloud(ray_origins, ray_directions, depth, color, mask = None):
+    if mask is not None:
+        ray_directions, depth = ray_directions[mask], depth[mask]
+
+    vertices = (ray_origins + ray_directions * depth[..., None]).view(-1, 3)
+    diffuse = color.expand(vertices.shape)
+    normals = -ray_directions.view(-1, 3)
+
     return vertices, diffuse, normals
 
 
-def comp_depth(depth_output, depth_target, options):
-    mask = depth_target > options.dataset.empty
+def comp_depth(depth_output, depth_target, empty_value = 0.):
+    mask = depth_target > empty_value
     depth_loss = torch.nn.functional.mse_loss(
         depth_output, depth_target
     )
@@ -316,110 +336,6 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
     rays_d = torch.stack([d0, d1, d2], -1)
 
     return rays_o, rays_d
-
-
-def gather_cdf_util(cdf, inds):
-    r"""A very contrived way of mimicking a version of the tf.gather()
-    call used in the original impl.
-    """
-    orig_inds_shape = inds.shape
-    inds_flat = [inds[i].view(-1) for i in range(inds.shape[0])]
-    valid_mask = [
-        torch.where(ind >= cdf.shape[1], torch.zeros_like(ind), torch.ones_like(ind))
-        for ind in inds_flat
-    ]
-    inds_flat = [
-        torch.where(ind >= cdf.shape[1], (cdf.shape[1] - 1) * torch.ones_like(ind), ind)
-        for ind in inds_flat
-    ]
-    cdf_flat = [cdf[i][ind] for i, ind in enumerate(inds_flat)]
-    cdf_flat = [cdf_flat[i] * valid_mask[i] for i in range(len(cdf_flat))]
-    cdf_flat = [
-        cdf_chunk.reshape([1] + list(orig_inds_shape[1:])) for cdf_chunk in cdf_flat
-    ]
-    return torch.cat(cdf_flat, dim = 0)
-
-
-def sample_pdf(bins, weights, num_samples, det = False):
-    # TESTED (Carefully, line-to-line).
-    # But chances of bugs persist; haven't integration-tested with
-    # training routines.
-
-    # Get pdf
-    weights = weights + 1e-5  # prevent nans
-    pdf = weights / weights.sum(-1).unsqueeze(-1)
-    cdf = torch.cumsum(pdf, -1)
-    cdf = torch.cat((torch.zeros_like(cdf[..., :1]), cdf), -1)
-
-    # Take uniform samples
-    if det:
-        u = torch.linspace(0.0, 1.0, num_samples).to(weights)
-        u = u.expand(list(cdf.shape[:-1]) + [num_samples])
-    else:
-        u = torch.rand(list(cdf.shape[:-1]) + [num_samples]).to(weights)
-
-    # Invert CDF
-    inds = torch.searchsorted(cdf.contiguous().detach(), u.contiguous().detach(), side="right")
-    below = torch.max(torch.zeros_like(inds), inds - 1)
-    above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
-    inds_g = torch.stack((below, above), -1)
-    orig_inds_shape = inds_g.shape
-
-    cdf_g = gather_cdf_util(cdf, inds_g)
-    bins_g = gather_cdf_util(bins, inds_g)
-
-    denom = cdf_g[..., 1] - cdf_g[..., 0]
-    denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
-    t = (u - cdf_g[..., 0]) / denom
-    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
-
-    return samples
-
-
-def sample_pdf_2(bins, weights, num_samples, det = False):
-    r"""sample_pdf function from another concurrent pytorch implementation
-    by yenchenlin (https://github.com/yenchenlin/nerf-pytorch).
-    """
-
-    weights = weights + 1e-5
-    pdf = weights / torch.sum(weights, dim = -1, keepdim = True)
-    cdf = torch.cumsum(pdf, dim = -1)
-    cdf = torch.cat(
-        [torch.zeros_like(cdf[..., :1]), cdf], dim = -1
-    )  # (batchsize, len(bins))
-
-    # Take uniform samples
-    if det:
-        u = torch.linspace(
-            0.0, 1.0, steps = num_samples, dtype = weights.dtype, device = weights.device
-        )
-        u = u.expand(list(cdf.shape[:-1]) + [num_samples])
-    else:
-        u = torch.rand(
-            list(cdf.shape[:-1]) + [num_samples],
-            dtype = weights.dtype,
-            device = weights.device,
-        )
-
-    # Invert CDF
-    u = u.contiguous().detach()
-    cdf = cdf.contiguous().detach()
-    inds = torch.searchsorted(cdf, u, right = True)
-    below = torch.max(torch.zeros_like(inds - 1), inds - 1)
-    above = torch.min((cdf.shape[-1] - 1) * torch.ones_like(inds), inds)
-    inds_g = torch.stack((below, above), dim = -1)  # (batchsize, num_samples, 2)
-
-    matched_shape = (inds_g.shape[0], inds_g.shape[1], cdf.shape[-1])
-    cdf_g = torch.gather(cdf.unsqueeze(1).expand(matched_shape), 2, inds_g)
-    bins_g = torch.gather(bins.unsqueeze(1).expand(matched_shape), 2, inds_g)
-
-    denom = cdf_g[..., 1] - cdf_g[..., 0]
-    denom = torch.where(denom < 1e-5, torch.ones_like(denom), denom)
-    t = (u - cdf_g[..., 0]) / denom
-    samples = bins_g[..., 0] + t * (bins_g[..., 1] - bins_g[..., 0])
-
-    return samples
-
 
 
 if __name__ == "__main__":

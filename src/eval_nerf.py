@@ -79,9 +79,9 @@ def main():
     except:
         raise FileNotFoundError("Could not find a .ckpt file in folder ", config_args.checkpoint)
 
-    model = getattr(models, "NeRFModel").load_from_checkpoint(checkpoint_path, cfg = cfg)
+    model = getattr(models, cfg.experiment.model).load_from_checkpoint(checkpoint_path, cfg = cfg)
     if config_args.high_freq_sampling:
-        model.sample_interval = RaySampleInterval(cfg.nerf.train.num_coarse)
+        model.sample_interval = RaySampleInterval(cfg, cfg.nerf.train.num_coarse)
         model.sample_pdf = SamplePDF(cfg.nerf.train.num_fine * 2)
 
     model.eval()
