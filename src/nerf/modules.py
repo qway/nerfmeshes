@@ -134,19 +134,19 @@ class RaySampleInterval(torch.nn.Module):
         # Ray sample count
         point_intervals = torch.linspace(0.0, 1.0, samples_count, device = "cuda")[None, :]
 
+        if len(near.shape) > 0 and near.shape[0] == ray_count:
+            near, far = near[:, None], far[:, None]
+
         # Sample in disparity space, as opposed to in depth space. Sampling in disparity is
         # nonlinear when viewed as depth sampling! (The closer to the camera the more samples)
         if not cfg.lindisp:
-            point_intervals = (
-                    near * (1.0 - point_intervals) + far * point_intervals
-            )
+            point_intervals = near * (1.0 - point_intervals) + far * point_intervals
         else:
-            point_intervals = 1.0 / (
-                    1.0 / near * (1.0 - point_intervals)
-                    + 1.0 / far * point_intervals
-            )
+            point_intervals = 1.0 / (1.0 / near * (1.0 - point_intervals) + 1.0 / far * point_intervals)
 
-        point_intervals = point_intervals.expand([ ray_count, samples_count ])
+        if len(near.shape) == 0 or near.shape[0] != ray_count:
+            point_intervals = point_intervals.expand([ ray_count, samples_count ])
+
         if cfg.perturb:
             # Get intervals between samples.
             mids = 0.5 * (point_intervals[..., 1:] + point_intervals[..., :-1])

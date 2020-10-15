@@ -1,21 +1,19 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: lego-buff
+  id: lego-buff-high-res
   # Base model, whether to use tree voxel sampling (BuFFModel) instead of hierarchical sampling (NeRFModel)
-  model: NeRFModel
+  model: BuFFModel
   # Experiment description
-  description: This is a human readable description message about the experiment.
+  description: High res buff model.
   # Experiment logs will be stored at "logdir"/"id"
   logdir: ../logs
   # Seed for random number generators (for repeatability).
   randomseed: 42
   # Number of training iterations.
-  train_iters: 32000
+  train_iters: 150000
   # Number of training iterations after which to validate.
-  validate_every: 5000
-  # Number of training iterations after which to checkpoint.
-  save_every: 5000
+  validate_every: 10000
   # Number of training iterations after which to print progress.
   print_every: 100
   # Base directory of mesh dataset.
@@ -28,7 +26,7 @@ experiment:
 # Tree parameters.
 tree:
   # Root subdivision power, higher requires more memory
-  subdivision_outer_count: 8
+  subdivision_outer_count: 12
   # Tree subdivision power, higher requires more memory
   subdivision_inner_count: 2
   # Max tree depth, higher requires more memory
@@ -42,9 +40,9 @@ tree:
   # Max tree voxels
   max_voxel_count: 2048
   # Step size before ticking ray batch integration (initially the scene is unresolved)
-  step_size_integration_offset: 4000
+  step_size_integration_offset: 6000
   # Step size consolidation
-  step_size_tree: 8000
+  step_size_tree: 12000
 
 # Logging parameters
 logging:
@@ -76,7 +74,7 @@ dataset:
   # Depth empty space plane.
   empty: 0.
   # Num workers.
-  num_workers: 4
+  num_workers: 6
   # Down-sample factor for images from the LLFF dataset.
   llff_downsample_factor: 8
   # Determines the hold-out images for LLFF.
@@ -105,7 +103,7 @@ models:
   # Coarse model parameters.
   coarse:
     # Number of layers in the model.
-    num_layers: 4
+    num_layers: 8
     # Add a skip connection once in a while.
     skip_step: 4
     # Position encoding.
@@ -113,7 +111,7 @@ models:
     # Number of view dependent layers (-1 for no view dependence)
     num_layers_view: -1
     # Size of the hidden layers
-    hidden_size: 128
+    hidden_size: 256
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -138,11 +136,11 @@ models:
   # Name of the torch.nn.Module class that implements the model.
   fine_type: RotFlexibleNeRFModel
   # Whether to use the final model.
-  use_fine: False
+  use_fine: True
   # Fine model parameters.
   fine:
     # Number of layers in the model.
-    num_layers: 4
+    num_layers: 8
     # Add a skip connection once in a while.
     skip_step: 4
     # Position encoding.
@@ -150,7 +148,7 @@ models:
     # Number of view dependent layers(-1 for no view dependence)
     num_layers_view: -1
     # Size of the hidden layers
-    hidden_size: 128
+    hidden_size: 256
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -198,28 +196,26 @@ nerf:
   train:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    num_random_rays: 4096
+    num_random_rays: 2048
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
-    chunksize: 4096
+    chunksize: 2048
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
-    num_coarse: 64
+    num_coarse: 128
     # Number of depth samples per ray for the fine network.
-    num_fine: 64
+    num_fine: 128
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
     radiance_field_noise_std: 0.2
     # Sample linearly in disparity space, as opposed to in depth space.
     lindisp: False
-    # Amount of regularization on luminance
-    lumi_lambda: 0.0001
   # Validation-specific parameters.
   validation:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    chunksize: 4096   # 1024 * 32
+    chunksize: 2048
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.

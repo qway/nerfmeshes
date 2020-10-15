@@ -19,9 +19,9 @@ from lightning_modules import LoggerCallback
 
 class PathParser:
 
-    def __init__(self, root_path: str):
+    def __init__(self):
         # root path
-        self.root_path = Path(root_path)
+        self.root_path = None
 
         # logger root log path
         self.log_root_dir = None
@@ -44,10 +44,14 @@ class PathParser:
     def parse(self, config_args):
         path = config_args.load_checkpoint
         if path is not None:
-            # path segments
-            self.exp_name, self.log_name, self.log_version = os.path.normpath(path).split(os.path.sep)[-3:]
+            # relative path segments
+            segments = os.path.normpath(path).split(os.path.sep)
 
-            self.config_path = str(self.root_path / path / "hparams.yaml")
+            # path segments
+            self.exp_name, self.log_name, self.log_version = segments[-3:]
+
+            # self.config_path = str(Path(path) / "hparams.yaml")
+            self.config_path = config_args.config
         else:
             self.config_path = config_args.config
 
@@ -56,6 +60,7 @@ class PathParser:
             cfg_dict = yaml.load(file, Loader=yaml.FullLoader)
             cfg = CfgNode(nest_dict(cfg_dict, sep="."))
 
+        self.root_path = Path(cfg.experiment.logdir)
         if path is None:
             self.exp_name = cfg.experiment.id
             self.log_name = config_args.run_name
@@ -78,8 +83,6 @@ class PathParser:
         if path is not None:
             # latest best checkpoint path
             self.checkpoint_path = str(self.checkpoint_dir / "model_last.ckpt")
-
-        self.checkpoint_dir = self.log_dir / "checkpoints"
 
         return cfg, logger
 
@@ -104,7 +107,7 @@ def main():
         help="Name of the training log run"
     )
     parser.add_argument(
-        "--deterministic", action="store_true", default=True,
+        "--deterministic", action="store_true", default=False,
         help="Run deterministic training, useful for experimenting"
     )
     parser.add_argument(
@@ -114,7 +117,7 @@ def main():
     config_args = parser.parse_args()
 
     # Log path
-    parser = PathParser("../logs")
+    parser = PathParser()
     cfg, logger = parser.parse(config_args)
 
     # # (Optional:) enable this to track autograd issues when debugging
@@ -132,10 +135,6 @@ def main():
     # Trainer callbacks
     logger_callback = LoggerCallback(cfg)
 
-    check_val_every_n_epoch = cfg.experiment.validate_every // len(model.train_dataset)
-    steps_train = cfg.experiment.train_iters
-    epochs_train = steps_train // len(model.train_dataset)
-
     # Optional profiler
     profiler = None
     if config_args.use_profiler:
@@ -145,7 +144,6 @@ def main():
         weights_summary=None,
         resume_from_checkpoint=parser.checkpoint_path,
         gpus=config_args.gpus,
-        check_val_every_n_epoch=check_val_every_n_epoch,
         default_root_dir=parser.log_dir,
         logger=logger,
         num_sanity_val_steps=0,
@@ -155,10 +153,6 @@ def main():
         precision=32,
         profiler=profiler,
         fast_dev_run=False,
-        max_epochs=epochs_train,
-        min_epochs=epochs_train,
-        min_steps=steps_train,
-        max_steps=steps_train,
         deterministic=config_args.deterministic,
         progress_bar_refresh_rate=0,
         accumulate_grad_batches=1,

@@ -130,6 +130,7 @@ dmypy.json
 
 
 #Custom
+models
 /data
 .idea
 **/cache/

@@ -5,6 +5,10 @@ description = "A mesh reconstruction tool build around Neural Radiance Fields"
 authors = ["Cristian Chivrga <cchivriga@gmail.com>"]
 license = "MIT"
 
+[virtualenvs]
+create = true
+in-project = true
+
 [tool.poetry.dependencies]
 python = "^3.7"
 imageio = "^2.8.0"

@@ -10,8 +10,8 @@ from nerf.loggers import LoggerDepthProjection, LoggerTreeWeights, LoggerTree, L
 
 
 class BuFFModel(BaseModel):
-    def __init__(self, cfg, hparams=None, *args, **kwargs):
-        super(BuFFModel, self).__init__(cfg, hparams, *args, **kwargs)
+    def __init__(self, cfg, *args, **kwargs):
+        super(BuFFModel, self).__init__(cfg, *args, **kwargs)
 
         # Primary model
         self.model = getattr(models, cfg.models.coarse_type)(**cfg.models.coarse)
@@ -112,7 +112,6 @@ class BuFFModel(BaseModel):
 
     def validation_step(self, image_ray_batch, batch_idx):
         bundle = DataBundle.deserialize(image_ray_batch).to_ray_batch()
-        # ray_origins, ray_directions, ray_targets, ray_bounds = get_ray_batch(image_ray_batch)
 
         # Manual batching, since images are expensive to be kept on GPU
         batch_size = self.cfg.nerf.validation.chunksize

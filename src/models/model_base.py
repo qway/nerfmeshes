@@ -6,6 +6,7 @@ from pytorch3d.ops import sample_points_from_meshes
 from pytorch3d.loss import chamfer_distance
 from torch.utils.tensorboard import SummaryWriter
 from mesh_nerf import extract_geometry, create_mesh
+from torch.optim.lr_scheduler import LambdaLR
 
 from abc import abstractmethod
 from pathlib import Path
@@ -17,36 +18,48 @@ from models.model_helpers import nest_dict, flatten_dict
 
 
 class BaseModel(pl.LightningModule):
-    def __init__(self, cfg, hparams=None, *args, **kwargs):
+    def __init__(self, cfg, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if hparams:
-            self.cfg = CfgNode(nest_dict(hparams, sep="."))
-            self.hparams = hparams
-        else:
-            self.cfg = cfg
-            self.hparams = flatten_dict(cfg, sep=".")
+        self.save_hyperparameters()
+        self.cfg = CfgNode(nest_dict(cfg, sep="."))
 
-        self.dataset_basepath = Path(cfg.dataset.basedir)
+        # Criterions
         self.loss = torch.nn.MSELoss()
         self.criterion_psnr = mse2psnr
 
-        self.train_dataset, self.val_dataset = None, None
+        # Custom modules
         self.volume_renderer = VolumeRenderer(
-            cfg.nerf.train.radiance_field_noise_std,
-            cfg.nerf.validation.radiance_field_noise_std,
-            cfg.dataset.white_background,
+            self.cfg.nerf.train.radiance_field_noise_std,
+            self.cfg.nerf.validation.radiance_field_noise_std,
+            self.cfg.dataset.white_background,
         )
+        self.sample_pdf = SamplePDF(self.cfg.nerf.train.num_fine)
 
-        self.sample_pdf = SamplePDF(cfg.nerf.train.num_fine)
-
-        self.load_train_dataset()
-        self.load_val_dataset()
-        if self.cfg.dataset.type == "scannet":
-            self.sensor_data = None
+        # Dataset types
+        self.train_dataset, self.val_dataset = None, None
 
     @abstractmethod
     def get_model(self):
         pass
+
+    def setup(self, stage):
+        # Load datasets
+        self.load_train_dataset()
+        self.load_val_dataset()
+
+        # Set up trainer parameters
+        # Min, max train steps
+        steps_train = self.cfg.experiment.train_iters
+        self.trainer.min_steps = steps_train
+        self.trainer.max_steps = steps_train
+
+        # Min, max train epochs
+        epochs_train = steps_train // len(self.train_dataset)
+        self.trainer.max_epochs = epochs_train
+        self.trainer.min_epochs = epochs_train
+
+        # Val relative to train step, as opposed to epoch
+        self.trainer.check_val_every_n_epoch = self.cfg.experiment.validate_every // len(self.train_dataset)
 
     def sample_points(self, points, rays=None, **kwargs):
         model = self.get_model()
@@ -92,20 +105,21 @@ class BaseModel(pl.LightningModule):
         if self.cfg.dataset.type == "blender":
             dataset = BlenderDataset(self.cfg, type=dataset_type)
         elif self.cfg.dataset.type == "scannet":
-            if not self.sensor_data:
-                self.sensor_data = SensorData(
-                    self.dataset_basepath / (self.dataset_basepath.name + ".sens")
-                )
-            dataset = ScanNetDataset(
-                self.sensor_data,
-                num_random_rays=self.cfg.nerf.train.num_random_rays,
-                near=self.cfg.dataset.near,
-                far=self.cfg.dataset.far,
-                stop=1000,  # Debug by loading only small part of the dataset
-                skip_every=10000,
-                scale=self.cfg.dataset.scale_factor,
-                resolution=self.cfg.dataset.resolution
-            )
+            pass
+            # if not self.sensor_data:
+            #     self.sensor_data = SensorData(
+            #         self.dataset_base_path / (self.dataset_base_path.name + ".sens")
+            #     )
+            # dataset = ScanNetDataset(
+            #     self.sensor_data,
+            #     num_random_rays=self.cfg.nerf.train.num_random_rays,
+            #     near=self.cfg.dataset.near,
+            #     far=self.cfg.dataset.far,
+            #     stop=1000,  # Debug by loading only small part of the dataset
+            #     skip_every=10000,
+            #     scale=self.cfg.dataset.scale_factor,
+            #     resolution=self.cfg.dataset.resolution
+            # )
         elif self.cfg.dataset.type == "colmap":
             dataset = LLFFDataset(self.cfg, type=dataset_type)
 
@@ -144,14 +158,26 @@ class BaseModel(pl.LightningModule):
 
         return val_dataloader
 
+    def get_scheduler(self, optimizer):
+        gamma = self.cfg.scheduler.options.gamma
+        step_size = self.cfg.scheduler.options.step_size
+
+        return LambdaLR(
+            optimizer,
+            lr_lambda=lambda step: gamma ** (step / step_size)
+        )
+
     def configure_optimizers(self):
         optimizer = getattr(torch.optim, self.cfg.optimizer.type)(
             self.parameters(), lr=self.cfg.optimizer.lr
         )
 
-        scheduler = getattr(torch.optim.lr_scheduler, self.cfg.scheduler.type)(
-            optimizer, **self.cfg.scheduler.options
-        )
+        if hasattr(torch.optim.lr_scheduler, self.cfg.scheduler.type):
+            scheduler = getattr(torch.optim.lr_scheduler, self.cfg.scheduler.type)(
+                optimizer, **self.cfg.scheduler.options
+            )
+        else:
+            scheduler = self.get_scheduler(optimizer)
 
         scheduler_dict = {
             'scheduler': scheduler,

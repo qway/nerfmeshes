@@ -22,10 +22,10 @@ def create_models(cfg) -> Tuple[torch.nn.Module, torch.nn.Module]:
 
 class NeRFModel(BaseModel):
 
-    def __init__(self, cfg, hparams=None, *args, **kwargs):
-        super(NeRFModel, self).__init__(cfg, hparams, *args, **kwargs)
+    def __init__(self, cfg, *args, **kwargs):
+        super(NeRFModel, self).__init__(cfg, *args, **kwargs)
 
-        self.model_coarse, self.model_fine = create_models(cfg)
+        self.model_coarse, self.model_fine = create_models(self.cfg)
         # samples_total =  self.cfg.nerf.train.num_coarse
         # if self.cfg.models.use_fine:
         #     samples_total = max(samples_total, samples_total + self.cfg.nerf.train.num_fine)
@@ -79,12 +79,27 @@ class NeRFModel(BaseModel):
 
     def training_step(self, ray_batch, batch_idx):
         # Unpacking bundle
-        bundle = DataBundle.deserialize(ray_batch).to_ray_batch()
+        bundle = DataBundle.deserialize(ray_batch).to("cpu").to_ray_batch()
 
-        # Forward pass
-        rgb_coarse, rgb_fine = self.forward((bundle.ray_origins, bundle.ray_directions, bundle.ray_bounds))
+        # Manual batching, since images are expensive to be kept on GPU
+        batch_size = self.cfg.nerf.train.chunksize
+        batch_count = bundle.ray_targets.shape[0] / batch_size
 
-        coarse_loss = self.loss(rgb_coarse, bundle.ray_targets)
+        coarse_loss, fine_loss = 0, 0
+        for i in range(0, bundle.ray_targets.shape[0], batch_size):
+            # re-usable slice
+            tn_slice = slice(i, i + batch_size)
+
+            # Forward pass
+            rgb_coarse, rgb_fine = self.forward((bundle.ray_origins.to(self.device), bundle.ray_directions[tn_slice].to(self.device), bundle.ray_bounds.to(self.device)))
+            rgb_target = bundle.ray_targets[tn_slice].to(self.device)
+            coarse_loss += self.loss(rgb_coarse, rgb_target)
+
+            if self.model_fine is not None:
+                fine_loss += self.loss(rgb_fine, rgb_target)
+
+        #  Compute loss
+        coarse_loss /= batch_count
         coarse_psnr = self.criterion_psnr(coarse_loss)
 
         log_vals = {
@@ -93,8 +108,8 @@ class NeRFModel(BaseModel):
         }
 
         loss = coarse_loss
-        if rgb_fine is not None:
-            fine_loss = self.loss(rgb_fine, bundle.ray_targets)
+        if self.cfg.models.use_fine:
+            fine_loss /= batch_count
             fine_psnr = self.criterion_psnr(fine_loss)
 
             loss += fine_loss
@@ -129,16 +144,12 @@ class NeRFModel(BaseModel):
             tn_slice = slice(i, i + batch_size)
 
             rgb_coarse, rgb_fine = self.forward((bundle.ray_origins, bundle.ray_directions[tn_slice], bundle.ray_bounds))
-            rgb_target = bundle.ray_targets[tn_slice, :3]
-            coarse_loss += self.loss(
-                rgb_coarse[..., :3], rgb_target
-            )
+            rgb_target = bundle.ray_targets[tn_slice]
+            coarse_loss += self.loss(rgb_coarse, rgb_target)
 
             all_rgb_coarse.append(rgb_coarse)
             if self.model_fine is not None:
-                fine_loss += self.loss(
-                    rgb_fine[..., :3], rgb_target
-                )
+                fine_loss += self.loss(rgb_fine, rgb_target)
 
                 all_rgb_fine.append(rgb_fine)
 
@@ -148,9 +159,7 @@ class NeRFModel(BaseModel):
         rgb_coarse = torch.cat(all_rgb_coarse, 0)
         self.logger.experiment.add_image(
             "validation/rgb_coarse/" + str(batch_idx),
-            cast_to_image(
-                rgb_coarse[..., :3].view(self.val_dataset.H, self.val_dataset.W, 3)
-            ),
+            cast_to_image(rgb_coarse.view(bundle.hwf[0], bundle.hwf[1], 3)),
             self.global_step,
         )
 
@@ -164,9 +173,7 @@ class NeRFModel(BaseModel):
             rgb_fine = torch.cat(all_rgb_fine, 0)
             self.logger.experiment.add_image(
                 "validation/rgb_fine/" + str(batch_idx),
-                cast_to_image(
-                    rgb_fine[..., :3].view(self.val_dataset.H, self.val_dataset.W, 3)
-                ),
+                cast_to_image(rgb_fine.view(bundle.hwf[0], bundle.hwf[1], 3)),
                 self.global_step,
             )
 
@@ -182,9 +189,7 @@ class NeRFModel(BaseModel):
 
         self.logger.experiment.add_image(
             "validation/img_target/" + str(batch_idx),
-            cast_to_image(
-                bundle.ray_targets[..., :3].view(self.val_dataset.H, self.val_dataset.W, 3)
-            ),
+            cast_to_image(bundle.ray_targets.view(bundle.hwf[0], bundle.hwf[1], 3)),
             self.global_step,
         )
 

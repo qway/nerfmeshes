@@ -1,4 +1,3 @@
-from __future__ import annotations
 from dataclasses import astuple, dataclass, field, fields
 from typing import Dict
 
@@ -109,7 +108,7 @@ class DataBundle:
         return iter([ getattr(self, k) for k in keys ])
 
     @staticmethod
-    def deserialize(dict: Dict) -> DataBundle:
+    def deserialize(dict: Dict):
         bundle = DataBundle()
         for field in fields(bundle):
             if field.name in dict:
@@ -117,7 +116,7 @@ class DataBundle:
 
         return bundle
 
-    def apply(self, func, names) -> DataBundle:
+    def apply(self, func, names):
         rel_names = [ name for name in names if getattr(self, name) is not None ]
         mapping = [ getattr(self, name) for name in rel_names ]
         values = func(mapping)
@@ -143,7 +142,7 @@ class DataBundle:
 
         return self
 
-    def to(self, device) -> DataBundle:
+    def to(self, device):
         for field in fields(self):
             value = getattr(self, field.name)
             if value is not None and isinstance(value, torch.Tensor):

@@ -169,14 +169,15 @@ class CachingDataset(Dataset):
             self.init_sampling(torch.load(self.paths[0])['hwf'])
             size = len(self.paths)
         else:
-            bundle = self.load_dataset()
+            self.data_bundle = self.load_dataset()
 
-            self.init_sampling(bundle.hwf)
+            self.init_sampling(self.data_bundle.hwf)
+            H, W, focal = self.data_bundle.hwf
             self.data_bundle.ray_origins, self.data_bundle.ray_directions = convert_poses_to_rays(
-                bundle.poses, self.H, self.W, self.focal
+                self.data_bundle.poses, H, W, focal
             )
 
-            size = bundle.size
+            size = self.data_bundle.size
 
             # if self.shuffle:
             #     shuffled_indices = np.arange(self.data_bundle.ray_targets.shape[0])
@@ -209,12 +210,12 @@ class CachingDataset(Dataset):
         return bundle.serialize(self.filters)
 
     def init_sampling(self, hwf):
-        self.H, self.W, self.focal = hwf
-        self.H, self.W = int(self.H), int(self.W)
+        # Unpack data props
+        H, W, _ = hwf
 
         # Coordinates to sample from, list of H * W indices in form of (width, height), H * W * 2
         self.coords = torch.stack(
-            meshgrid_xy(torch.arange(self.H), torch.arange(self.W)),
+            meshgrid_xy(torch.arange(H), torch.arange(W)),
             dim = -1,
         ).reshape((-1, 2))
 

@@ -116,18 +116,18 @@ def export_marching_cubes(model, config_args, cfg, device):
     # Mesh Extraction
     N = config_args.res
     iso_value = config_args.iso_level
-    batch_size = 4096
+    batch_size = 1024
     density_samples_count = 6
     chunk = int(density_samples_count / 2)
     gap = 1e0
     gap_samples = 128
     distance_length = 0.001
     distance_threshold = 0.001
-    view_disparity = 1e-1
+    view_disparity = 1e-3
     limit = config_args.limit
     sampling_method = 0
-    dynamic_disparity = True
-    with_view_dependence = False
+    dynamic_disparity = False
+    with_view_dependence = True
     adjust_normals = False
 
     vertices, triangles, normals, diffuse = None, None, None, None
@@ -136,34 +136,34 @@ def export_marching_cubes(model, config_args, cfg, device):
         print("Generating mesh geometry...")
 
         if config_args.super_sampling >= 1:
-            grid_alpha_x, pts_flat_x = sample_points((N + (N - 1) * config_args.super_sampling, N, N), batch_size, device,
-                                                     model, limit)
-            grid_alpha_y, pts_flat_y = sample_points((N, N + (N - 1) * config_args.super_sampling, N), batch_size, device,
-                                                     model, limit)
-            grid_alpha_z, pts_flat_z = sample_points((N, N, N + (N - 1) * config_args.super_sampling), batch_size, device,
-                                                     model, limit)
-            if iso_value is None:
-                iso_value_x = np.maximum(grid_alpha_x, 0).mean()
-                iso_value_y = np.maximum(grid_alpha_x, 0).mean()
-                iso_value_z = np.maximum(grid_alpha_x, 0).mean()
-                iso_value = np.mean([iso_value_x, iso_value_y, iso_value_z])
-
-            print("Iso-Value:", iso_value)
-            vertices, triangles = mcubes.marching_cubes_super_sampling(grid_alpha_x, grid_alpha_y, grid_alpha_z,
-                                                                       iso_value)
-            vertices = np.ascontiguousarray(vertices)
-            mcubes.export_obj(vertices, triangles, os.path.join(config_args.save_dir, "mesh.obj"))
-            return
+            pass
+            # grid_alpha_x, pts_flat_x = sample_points((N + (N - 1) * config_args.super_sampling, N, N), batch_size, device,
+            #                                          model, limit)
+            # grid_alpha_y, pts_flat_y = sample_points((N, N + (N - 1) * config_args.super_sampling, N), batch_size, device,
+            #                                          model, limit)
+            # grid_alpha_z, pts_flat_z = sample_points((N, N, N + (N - 1) * config_args.super_sampling), batch_size, device,
+            #                                          model, limit)
+            # if iso_value is None:
+            #     iso_value_x = np.maximum(grid_alpha_x, 0).mean()
+            #     iso_value_y = np.maximum(grid_alpha_x, 0).mean()
+            #     iso_value_z = np.maximum(grid_alpha_x, 0).mean()
+            #     iso_value = np.mean([iso_value_x, iso_value_y, iso_value_z])
+            #
+            # print("Iso-Value:", iso_value)
+            # vertices, triangles = mcubes.marching_cubes_super_sampling(grid_alpha_x, grid_alpha_y, grid_alpha_z,
+            #                                                            iso_value)
+            # vertices = np.ascontiguousarray(vertices)
+            # mcubes.export_obj(vertices, triangles, os.path.join(config_args.save_dir, "mesh.obj"))
+            # return
         else:
             # Extract model geometry
-            vertices, triangles, normals, grid_alpha, pts_flat, density = extract_geometry(model.get_model(), N, batch_size, limit, iso_value)
+            vertices, triangles, normals, grid_alpha, pts_flat, density = extract_geometry(model, N, batch_size, limit,
+                                                                                           iso_value)
 
             # targets = torch.from_numpy(vertices) / N * 2 * limit - limit
-            targets = torch.from_numpy(vertices)
-            inv_normals = -torch.from_numpy(normals)
+            inv_normals = -normals
 
             # Reorder coordinates
-            targets = targets[:, [1, 0, 2]]
             inv_normals = inv_normals[:, [1, 0, 2]]
 
             if adjust_normals:
@@ -188,8 +188,6 @@ def export_marching_cubes(model, config_args, cfg, device):
 
     # Query directly without specific-views
     if not with_view_dependence:
-        targets = vertices[:, [1, 0, 2]]
-
         diffuse = np.zeros((len(targets), 3))
         for idx in tqdm(range(0, len(targets) // batch_size + 1)):
             offset1 = batch_size * idx
@@ -200,7 +198,7 @@ def export_marching_cubes(model, config_args, cfg, device):
             # result_batch = model.sample_points(pos_batch, None)
 
             # Current color hack since the network does not normalize colors
-            result_batch = torch.nn.functional.sigmoid(result_batch[..., :3]) * 255
+            result_batch = result_batch[..., :3]
             # Query the whole diffuse map
             diffuse[offset1:offset2] = result_batch[..., :3].cpu().detach().numpy()
     else:
@@ -223,12 +221,11 @@ def export_marching_cubes(model, config_args, cfg, device):
             view_disparity = torch.max(tn_offset, torch.ones((targets.shape[0], 1)) * view_disparity)
 
             # Careful, do not set the near plane to zero!
-            ray_bounds = (view_disparity * 2).expand(view_disparity.shape[0], 2)
-            ray_bounds[0] = 0.001
+            ray_bounds = (view_disparity * 2).expand(view_disparity.shape[0], 2).clone()
+            ray_bounds[:, 0] = 0.001
         else:
             ray_bounds = (
                 torch.tensor([0.001, 2 * view_disparity], dtype=ray_origins.dtype)
-                    .view(1, 2)
                     .expand(ray_origins.shape[0], 2)
             )
 
@@ -238,7 +235,7 @@ def export_marching_cubes(model, config_args, cfg, device):
             # Provide ray directions as input
             rays = torch.cat((rays, inv_normals), dim=-1)
 
-        ray_batches = get_minibatches(rays, chunksize = batch_size)
+        ray_batches = get_minibatches(rays, chunksize=batch_size)
 
         pred = []
         print("Started ray-casting")
@@ -247,20 +244,20 @@ def export_marching_cubes(model, config_args, cfg, device):
             ray_batch = ray_batch.to(device)
             bray_origins, bray_bounds, bray_directions = ray_batch[..., :3], ray_batch[..., 3:5], ray_batch[..., 5:8]
 
-            diffuse, _ = model.forward((bray_origins, bray_directions, bray_bounds))
+            diffuse, _ = model.forward((bray_origins, bray_directions, bray_bounds.transpose(0, 1)))
             pred.append(diffuse.cpu().detach())
 
         # Query the whole diffuse map
-        diffuse = torch.cat(pred, dim = 0).numpy()
+        diffuse = torch.cat(pred, dim=0).numpy()
 
     # Export model
     print("Saving final model...", end="")
-    export_obj(vertices, triangles, diffuse, normals, os.path.join(args.save_dir, "mesh.obj"))
+    export_obj(vertices, triangles, diffuse, normals, os.path.join(config_args.save_dir, "mesh.obj"))
     print("Saved!")
 
 
 # model, N = 400, batch_size = 4096, limit = 1.2, iso_value = 32
-def sample_points(N, batch_size, device, model, limit, color = False):
+def sample_points(N, batch_size, device, model, limit, color=False):
     if isinstance(N, tuple):
         x, y, z = N
         t_x = np.linspace(-limit, limit, x)
@@ -302,11 +299,10 @@ def sample_points(N, batch_size, device, model, limit, color = False):
         grid_color = colors.reshape((x, y, z, 3))
         return grid_alpha, grid_color, pts_flat
 
-
     return grid_alpha, pts_flat, density
 
 
-def extract_geometry(model, N = 400, batch_size = 4096, limit = 1.2, iso_value = 32):
+def extract_geometry(model, N=400, batch_size=4096, limit=1.2, iso_value=32):
     # Sample points based on the grid
     grid_alpha, pts_flat, density = sample_points(N, batch_size, device, model, limit)
 
@@ -332,12 +328,6 @@ if __name__ == "__main__":
         "--config", type=str, required=True, help="Path to (.yml) config file."
     )
     parser.add_argument(
-        "--base-dir",
-        type=str,
-        required=False,
-        help="Override the default base dir.",
-    )
-    parser.add_argument(
         "--checkpoint",
         type=str,
         required=True,
@@ -353,44 +343,37 @@ if __name__ == "__main__":
         default=32
     )
     parser.add_argument(
-        "folder", type = str, help = "Path to Log Folder"
-    )
-    parser.add_argument(
         "--limit",
-        type = float,
-        help = "Limits in -xyz to xyz for mcubes.",
-        default = 1.2
+        type=float,
+        help="Limits in -xyz to xyz for mcubes.",
+        default=1.2
     )
     parser.add_argument(
         "--res",
-        type = int,
-        help = "Sampling resolution for mcubes.",
-        default = 128
+        type=int,
+        help="Sampling resolution for mcubes.",
+        default=128
     )
     parser.add_argument(
         "--super-sampling",
-        type = int,
-        help = "Add super sampling along the edges.",
-        default = 0,
+        type=int,
+        help="Add super sampling along the edges.",
+        default=0,
     )
     parser.add_argument('--no-cache-mesh', dest='cache_mesh', action='store_false')
-    parser.set_defaults(no_cache_mesh = True)
+    parser.set_defaults(no_cache_mesh=True)
 
-    args = parser.parse_args()
-    log_folder = Path(args.folder)
-    with (log_folder / "hparams.yaml").open() as f:
+    config_args = parser.parse_args()
+    log_folder = Path(config_args.config)
+    with log_folder.open() as f:
         hparams = yaml.load(f, Loader=yaml.FullLoader)
         cfg = CfgNode(nest_dict(hparams, sep="."))
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    try:
-        checkpoint_path = next(log_folder.glob('**/*.ckpt'))
-    except:
-        raise FileNotFoundError("Could not find a .ckpt file in folder ", args.checkpoint)
-
-    model = getattr(models, cfg.experiment.model).load_from_checkpoint(checkpoint_path, cfg = cfg)
+    checkpoint_path = config_args.checkpoint
+    model = getattr(models, cfg.experiment.model).load_from_checkpoint(checkpoint_path)
     model.eval()
     model.to(device)
 
-    export_marching_cubes(model, args, cfg, device)
+    export_marching_cubes(model, config_args, cfg, device)
