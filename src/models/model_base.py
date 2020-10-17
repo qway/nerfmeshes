@@ -9,19 +9,18 @@ from mesh_nerf import extract_geometry, create_mesh
 from torch.optim.lr_scheduler import LambdaLR
 
 from abc import abstractmethod
-from pathlib import Path
 from torch.utils.data import DataLoader
 from data.datasets import BlenderDataset, ScanNetDataset, LLFFDataset, DatasetType, SynthesizableDataset
 from data.loaders.load_scannet import SensorData
-from nerf import CfgNode, mse2psnr, VolumeRenderer, SamplePDF
+from nerf import CfgNode, mse2psnr, VolumeRenderer
 from models.model_helpers import nest_dict, flatten_dict
 
 
 class BaseModel(pl.LightningModule):
     def __init__(self, cfg, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.save_hyperparameters()
         self.cfg = CfgNode(nest_dict(cfg, sep="."))
+        self.hparams = flatten_dict(cfg, sep=".")
 
         # Criterions
         self.loss = torch.nn.MSELoss()
@@ -33,7 +32,6 @@ class BaseModel(pl.LightningModule):
             self.cfg.nerf.validation.radiance_field_noise_std,
             self.cfg.dataset.white_background,
         )
-        self.sample_pdf = SamplePDF(self.cfg.nerf.train.num_fine)
 
         # Dataset types
         self.train_dataset, self.val_dataset = None, None
@@ -61,9 +59,15 @@ class BaseModel(pl.LightningModule):
         # Val relative to train step, as opposed to epoch
         self.trainer.check_val_every_n_epoch = self.cfg.experiment.validate_every // len(self.train_dataset)
 
+    @abstractmethod
+    def query_diffuse(self, ray_batch):
+        pass
+
     def sample_points(self, points, rays=None, **kwargs):
+        # Get finest model
         model = self.get_model()
-        results = model(points, rays, **kwargs)
+
+        results = model.forward(points, rays, **kwargs)
         if isinstance(results, tuple):
             return results[0]
 
@@ -79,13 +83,13 @@ class BaseModel(pl.LightningModule):
         # Compute chamfer Loss
         if self.cfg.experiment.chamfer_loss and isinstance(self.val_dataset, SynthesizableDataset):
             assert self.val_dataset.target_mesh is not None, "To compute the " \
-                                                             "chamfer loss, a target mesh .obj must be provided in the dataset folder"
+                "chamfer loss, a target mesh .obj must be provided in the dataset folder"
 
             # Target model to query based on the grid
             model = self.get_model()
 
             # Read the input 3D model
-            vertices, faces, _, _, _, _ = extract_geometry(model)
+            vertices, faces, _, _, _, _ = extract_geometry(model, self.device, None)
 
             # We construct a Meshes structure for the target mesh
             input_mesh = create_mesh(vertices, faces)
@@ -105,21 +109,7 @@ class BaseModel(pl.LightningModule):
         if self.cfg.dataset.type == "blender":
             dataset = BlenderDataset(self.cfg, type=dataset_type)
         elif self.cfg.dataset.type == "scannet":
-            pass
-            # if not self.sensor_data:
-            #     self.sensor_data = SensorData(
-            #         self.dataset_base_path / (self.dataset_base_path.name + ".sens")
-            #     )
-            # dataset = ScanNetDataset(
-            #     self.sensor_data,
-            #     num_random_rays=self.cfg.nerf.train.num_random_rays,
-            #     near=self.cfg.dataset.near,
-            #     far=self.cfg.dataset.far,
-            #     stop=1000,  # Debug by loading only small part of the dataset
-            #     skip_every=10000,
-            #     scale=self.cfg.dataset.scale_factor,
-            #     resolution=self.cfg.dataset.resolution
-            # )
+            raise NotImplementedError
         elif self.cfg.dataset.type == "colmap":
             dataset = LLFFDataset(self.cfg, type=dataset_type)
 
@@ -186,3 +176,13 @@ class BaseModel(pl.LightningModule):
         }
 
         return [optimizer], [scheduler_dict]
+
+    def check_early_stopping(self, rgb):
+        # Current experiment
+        experiment = self.cfg.experiment
+        if experiment.use_early_stopping and self.global_step == experiment.early_stopping_step:
+            rgb_sum = rgb.sum()
+            if rgb_sum < 1e-12:
+                print(f"Model is stuck in local minima, model collapsing to {rgb_sum}")
+                print("Restart the training again, exiting now...")
+                exit(-1)

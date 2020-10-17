@@ -1,12 +1,19 @@
+import os
 import re
+import yaml
 
+from pathlib import Path
+from nerf import CfgNode
+from models.model_helpers import nest_dict
 from tqdm import tqdm
+
 from pytorch_lightning.callbacks import Callback
+from pytorch_lightning.loggers import TensorBoardLogger
 
 
 class LoggerCallback(Callback):
     """
-        Global progress bar.
+        Global progress bar, manages two progress bars for both train & validation steps.
     """
 
     def __init__(self, cfg, global_progress: bool = True, leave_global_progress: bool = True):
@@ -134,3 +141,82 @@ class LoggerCallback(Callback):
     def on_validation_end(self, trainer, pl_module):
         """Called when the validation loop ends."""
         self.val_pb.clear()
+
+
+class PathParser:
+    """
+        Path parser that returns experiment configuration props and manage paths for model's persistence.
+    """
+
+    LOG_RUN_NAME = "default"
+    CHECKPOINT_NAME_LAST = "model_last.ckpt"
+
+    def __init__(self):
+        # root path
+        self.root_path = None
+
+        # config path
+        self.config_path = None
+
+        # logger root log path
+        self.log_root_dir, self.log_dir = None, None
+
+        # logger log version
+        self.exp_name, self.log_name, self.log_version = None, None, None
+
+        # checkpoints dir, latest best checkpoint path
+        self.checkpoint_dir, self.checkpoint_path = None, None
+
+    def parse(self, config_path = None, log_path = None, run_name = LOG_RUN_NAME, checkpoint_name = CHECKPOINT_NAME_LAST, create_logger = False):
+        assert ((config_path is not None) != (log_path is not None)), \
+            "Either config or log with checkpoints must be provided, append option --help for more information."
+
+        if log_path is not None:
+            # relative path segments
+            segments = os.path.normpath(log_path).split(os.path.sep)
+
+            # path segments
+            self.exp_name, self.log_name, self.log_version = segments[-3:]
+
+            # Logger log dir
+            self.log_dir = Path(log_path)
+
+            # Config path
+            self.config_path = str(self.log_dir / TensorBoardLogger.NAME_HPARAMS_FILE)
+        else:
+            self.config_path = config_path
+
+        # Read config file.
+        with open(self.config_path, "r") as file:
+            cfg_dict = yaml.load(file, Loader=yaml.FullLoader)
+            cfg = CfgNode(nest_dict(cfg_dict, sep="."))
+
+        self.root_path = Path(cfg.experiment.logdir)
+        if log_path is None:
+            self.exp_name = cfg.experiment.id
+            self.log_name = run_name
+
+        # Log root experiment path
+        self.log_root_dir = str(self.root_path / self.exp_name)
+
+        # Train logger
+        logger = None
+        if create_logger:
+            os.makedirs(Path(self.log_root_dir) / self.log_name, exist_ok=True)
+            # Create logger instance
+            logger = TensorBoardLogger(self.log_root_dir, self.log_name, version=self.log_version)
+            print("New logger initiated...")
+
+            # Logger log dir, if conflicting log_version
+            self.log_dir = Path(logger.log_dir)
+
+        print(f"Current log dir {self.log_dir}")
+        # Checkpoint dir
+        self.checkpoint_dir = self.log_dir / "checkpoints"
+        os.makedirs(self.checkpoint_dir, exist_ok=True)
+
+        if log_path is not None:
+            # latest best checkpoint path
+            self.checkpoint_path = str(self.checkpoint_dir / checkpoint_name)
+
+        return cfg, logger

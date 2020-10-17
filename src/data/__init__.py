@@ -1,2 +1,2 @@
-from data.loaders.load_blender import load_blender_data
+from data.loaders import *
 from .data_helpers import *

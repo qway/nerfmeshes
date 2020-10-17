@@ -1,10 +1,9 @@
 import torch
-import time
 
 from models import BaseModel
 from models.model_helpers import intervals_to_ray_points
 from typing import Tuple
-from nerf import models, RaySampleInterval, cast_to_image
+from nerf import models, cast_to_image, RaySampleInterval, SamplePDF
 from data.data_helpers import DataBundle
 
 
@@ -29,7 +28,10 @@ class NeRFModel(BaseModel):
         # samples_total =  self.cfg.nerf.train.num_coarse
         # if self.cfg.models.use_fine:
         #     samples_total = max(samples_total, samples_total + self.cfg.nerf.train.num_fine)
+
+        # Custom modules
         self.sample_interval = RaySampleInterval()
+        self.sample_pdf = SamplePDF(self.cfg.nerf.train.num_fine)
 
     def get_model(self):
         return self.model_fine if self.model_fine is not None else self.model_coarse
@@ -61,7 +63,7 @@ class NeRFModel(BaseModel):
         rgb_coarse, _, weights, _, = self.volume_renderer(coarse_radiance_field, ray_intervals, ray_directions)
 
         rgb_fine, disp_fine, acc_fine, depth_fine = None, None, None, None
-        if nerf_cfg.num_fine > 0 and self.model_fine is not None:
+        if self.model_fine is not None:
             fine_ray_intervals = self.sample_pdf(ray_intervals, weights, nerf_cfg.perturb)
             ray_points = intervals_to_ray_points(
                 fine_ray_intervals, ray_directions, ray_origins
@@ -76,6 +78,12 @@ class NeRFModel(BaseModel):
             )
 
         return rgb_coarse, rgb_fine
+
+    def query_diffuse(self, ray_batch):
+        # View dependent diffuse batch queried
+        _, diffuse_batch = self.forward(ray_batch)
+
+        return diffuse_batch
 
     def training_step(self, ray_batch, batch_idx):
         # Unpacking bundle
@@ -95,8 +103,13 @@ class NeRFModel(BaseModel):
             rgb_target = bundle.ray_targets[tn_slice].to(self.device)
             coarse_loss += self.loss(rgb_coarse, rgb_target)
 
+            # Early stopping if the scene data is too sparse
+            self.check_early_stopping(rgb_coarse)
             if self.model_fine is not None:
                 fine_loss += self.loss(rgb_fine, rgb_target)
+
+                # Early stopping if the scene data is too sparse
+                self.check_early_stopping(rgb_fine)
 
         #  Compute loss
         coarse_loss /= batch_count

@@ -17,13 +17,6 @@ class FlexibleNeRFModel(torch.nn.Module):
         **kwargs
     ):
         super(FlexibleNeRFModel, self).__init__()
-        print(num_layers)
-        print(hidden_size)
-        print(skip_step)
-        print(num_encoding_fn_xyz)
-        print(num_encoding_fn_dir)
-        print(include_input_dir)
-        print(log_sampling_dir)
         self.encode_xyz = PositionalEncoding(
             num_encoding_fn_xyz, include_input_xyz, log_sampling_xyz
         )

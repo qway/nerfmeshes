@@ -1,90 +1,14 @@
 import os
 import argparse
-import time
 import torch
-import yaml
 import models
 
-from pathlib import Path
 from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.callbacks import ModelCheckpoint
 from pytorch_lightning.core.memory import ModelSummary
-from pytorch_lightning.loggers import TensorBoardLogger
 from pytorch_lightning.profiler import AdvancedProfiler
 
-from nerf import CfgNode
-from models import nest_dict
-from lightning_modules import LoggerCallback
-
-
-class PathParser:
-
-    def __init__(self):
-        # root path
-        self.root_path = None
-
-        # logger root log path
-        self.log_root_dir = None
-
-        # logger log path
-        self.log_dir = None
-
-        # logger log version
-        self.exp_name, self.log_name, self.log_version = None, None, None
-
-        # checkpoints dir
-        self.checkpoint_dir = None
-
-        # latest best checkpoint dir
-        self.checkpoint_path = None
-
-        # config path
-        self.config_path = None
-
-    def parse(self, config_args):
-        path = config_args.load_checkpoint
-        if path is not None:
-            # relative path segments
-            segments = os.path.normpath(path).split(os.path.sep)
-
-            # path segments
-            self.exp_name, self.log_name, self.log_version = segments[-3:]
-
-            # self.config_path = str(Path(path) / "hparams.yaml")
-            self.config_path = config_args.config
-        else:
-            self.config_path = config_args.config
-
-        # Read config file.
-        with open(self.config_path, "r") as file:
-            cfg_dict = yaml.load(file, Loader=yaml.FullLoader)
-            cfg = CfgNode(nest_dict(cfg_dict, sep="."))
-
-        self.root_path = Path(cfg.experiment.logdir)
-        if path is None:
-            self.exp_name = cfg.experiment.id
-            self.log_name = config_args.run_name
-
-        # Log root experiment path
-        self.log_root_dir = str(self.root_path / self.exp_name)
-
-        # Train logger
-        os.makedirs(Path(self.log_root_dir) / self.log_name, exist_ok=True)
-        # TODO: default_hp_metric -> False
-        logger = TensorBoardLogger(self.log_root_dir, self.log_name, version=self.log_version)
-
-        # Logger log dir
-        self.log_dir = Path(logger.log_dir)
-
-        # Checkpoint dir
-        self.checkpoint_dir = self.log_dir / "checkpoints"
-        os.makedirs(self.checkpoint_dir, exist_ok=True)
-
-        if path is not None:
-            # latest best checkpoint path
-            self.checkpoint_path = str(self.checkpoint_dir / "model_last.ckpt")
-
-        return cfg, logger
+from lightning_modules import LoggerCallback, PathParser
 
 
 def main():
@@ -92,19 +16,28 @@ def main():
 
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--config", type=str, required=True, help="Path to (.yml) config file."
+        "--config", type=str, default=None,
+        help="Path to (.yml) config file if running new experiment."
+    )
+    parser.add_argument(
+        "--log-checkpoint", type=str, default=None,
+        help="Training log path with the config and checkpoints to resume the experiment.",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default="model_last.ckpt",
+        help="Resume training from the latest checkpoint by default.",
+    )
+    parser.add_argument(
+        "--run-name", type=str, default="default",
+        help="Name of the training log run"
     )
     parser.add_argument(
         "--gpus", type=int, default=1,
         help="Amount of Gpus that should be used(In most cases leave at 1)",
     )
     parser.add_argument(
-        "--load-checkpoint", type=str, default=None,
-        help="Path to the training log to resume training.",
-    )
-    parser.add_argument(
-        "--run-name", type=str, default="default",
-        help="Name of the training log run"
+        "--precision", type=int, default=32,
+        help="Full precision (32) default, half precision (16) on newer devices to speed up the training.",
     )
     parser.add_argument(
         "--deterministic", action="store_true", default=False,
@@ -117,8 +50,8 @@ def main():
     config_args = parser.parse_args()
 
     # Log path
-    parser = PathParser()
-    cfg, logger = parser.parse(config_args)
+    path_parser = PathParser()
+    cfg, logger = path_parser.parse(config_args.config, config_args.log_checkpoint, config_args.run_name, config_args.checkpoint, create_logger = True)
 
     # # (Optional:) enable this to track autograd issues when debugging
     # torch.autograd.set_detect_anomaly(True)
@@ -129,7 +62,7 @@ def main():
     model = getattr(models, cfg.experiment.model)(cfg)
 
     # Model checkpoint generator
-    checkpoint_callback = ModelCheckpoint(filepath=parser.checkpoint_dir, save_top_k=3, save_last=True, verbose=True,
+    checkpoint_callback = ModelCheckpoint(filepath=path_parser.checkpoint_dir, save_top_k=3, save_last=True, verbose=True,
                                           monitor="val_loss", mode="min", prefix="model_")
 
     # Trainer callbacks
@@ -142,15 +75,15 @@ def main():
 
     trainer = Trainer(
         weights_summary=None,
-        resume_from_checkpoint=parser.checkpoint_path,
+        resume_from_checkpoint=path_parser.checkpoint_path,
         gpus=config_args.gpus,
-        default_root_dir=parser.log_dir,
+        default_root_dir=path_parser.log_dir,
         logger=logger,
         num_sanity_val_steps=0,
         checkpoint_callback=checkpoint_callback,
         row_log_interval=1,
         log_gpu_memory=None,
-        precision=32,
+        precision=config_args.precision,
         profiler=profiler,
         fast_dev_run=False,
         deterministic=config_args.deterministic,
@@ -159,10 +92,11 @@ def main():
         callbacks=[logger_callback]
     )
 
-    # Add log props
-    logger.experiment.add_text("description", cfg.experiment.description, 0)
-    logger.experiment.add_text("config", f"\t{cfg.dump()}".replace("\n", "\n\t"), 0)
-    logger.experiment.add_text("params", f"\t{ModelSummary(model, mode='full')}".replace("\n", "\n\t"), 0)
+    if config_args.log_checkpoint is not None:
+        # Add log props
+        logger.experiment.add_text("description", cfg.experiment.description, 0)
+        logger.experiment.add_text("config", f"\t{cfg.dump()}".replace("\n", "\n\t"), 0)
+        logger.experiment.add_text("params", f"\t{ModelSummary(model, mode='full')}".replace("\n", "\n\t"), 0)
 
     trainer.fit(model)
 

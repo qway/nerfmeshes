@@ -2,378 +2,310 @@ import argparse
 import os
 import numpy as np
 import torch
-import yaml
 import models
 
+from importlib import import_module
 from pytorch3d.structures import Meshes
-from nerf import get_minibatches
-from nerf.nerf_helpers import cumprod_exclusive
-
-# try:
-#     import marching_cubes as mcubes
-# except:
-#     print("Error, justus' version of pymcubes not installed!")
-#     print("""
-#     Run the following commands(Note that its currently not possible to install through a package manager, since it depends on eigen):
-#
-#     poetry shell
-#     cd ../additional_dependencies/PyMarchingCubes
-#     python setup.py install
-# """)
-
-
-from pathlib import Path
 from skimage import measure
-from scipy.spatial import KDTree
 from tqdm import tqdm
-from nerf import CfgNode
-from models.model_helpers import nest_dict
 from nerf.nerf_helpers import export_obj
+from lightning_modules import PathParser
 
 
-def create_mesh(verts, faces_idx):
+def create_mesh(vertices, faces_idx):
     # We scale normalize and center the target mesh to fit in a sphere of radius 1 centered at (0,0,0).
     # (scale, center) will be used to bring the predicted mesh to its original center and scale
-    verts = verts - verts.mean(0)
-    scale = max(verts.abs().max(0)[0])
-    verts = verts / scale
+    vertices = vertices - vertices.mean(0)
+    scale = max(vertices.abs().max(0)[0])
+    vertices = vertices / scale
 
     # We construct a Meshes structure for the target mesh
-    target_mesh = Meshes(verts=[verts], faces=[faces_idx])
+    target_mesh = Meshes(verts=[vertices], faces=[faces_idx])
 
     return target_mesh
 
 
-def adjusting_normals(config_args, density, N, chunk, density_samples_count, distance_length, limit, normals,
-                      pts_flat, sampling_method, vertices, distance_threshold):
-    # Re-adjust normals based on NERF's density grid
-    # Create a density KDTree look-up table
-    tree = KDTree(pts_flat) if sampling_method == 0 else None
-    # Create some density samples
-    density_samples = np.linspace(
-        -distance_length, distance_length, density_samples_count
-    )[:, np.newaxis]
-    # Adjust normals with the assumption of having proper geometry
-    print("Adjusting normals")
-    for index, vertex in enumerate(tqdm(vertices)):
-        vertex_norm = vertex[[1, 0, 2]] / N * 2 * limit - limit
-        vertex_direction = normals[index][[1, 0, 2]]
+def batchify(*data, batch_size=1024, device="cpu"):
+    assert all(sample.shape[0] == data[0].shape[0] for sample in data), \
+        "Sizes of tensors must match for dimension 0."
 
-        # Sample points across the ray direction (a.k.a normal)
-        samples = (
-                vertex_norm[np.newaxis, :].repeat(density_samples_count, 0)
-                + vertex_direction[np.newaxis, :].repeat(density_samples_count, 0)
-                * density_samples
-        )
+    # Custom batchifier
+    def batchifier():
+        # Data size and current batch offset
+        size, batch_offset = data[0].shape[0], 0
 
-        def extract_cum_density(samples):
-            inliers_indices = None
-            if sampling_method == 0:
-                # Sample 1th nearest neighbor
-                distances, indices = tree.query(samples, 1)
+        while batch_offset < size:
+            # Subsample slice
+            batch_slice = slice(batch_offset, batch_offset + batch_size)
 
-                # Filter outliers
-                inliers_indices = indices[distances <= distance_threshold]
-            elif sampling_method == 1:
-                # Sample based on grid proximity
-                indices = (
-                    (
-                            np.around((samples + limit) / 2 / limit * N)
-                            * N ** np.arange(2, -1, -1)
-                    )
-                        .sum(1)
-                        .astype(int)
-                )
+            # Yield each subsample, and move to available device
+            yield [sample[batch_slice].to(device) for sample in data]
 
-                # Filtering exceeding boundaries
-                inliers_indices = indices[~(indices >= N ** 3)]
-            else:
-                # Sample based on re-computing the radiance field
-                indices = (
-                    (
-                            np.around((samples + limit) / 2 / limit * N)
-                            * N ** np.arange(2, -1, -1)
-                    )
-                        .sum(1)
-                        .astype(int)
-                )
+            batch_offset += batch_size
 
-                # Filtering exceeding boundaries
-                inliers_indices = indices[~(indices >= N ** 3)]
+    # Total batches
+    total = (data[0].shape[0] - 1) // batch_size + 1
 
-            return density[inliers_indices].sum()
-
-        # Extract densities
-        sample_density_1 = extract_cum_density(samples[:chunk])
-        sample_density_2 = extract_cum_density(samples[chunk:])
-
-        # Re-direct the normal
-        if sample_density_1 < sample_density_2:
-            normals[index] *= -1
+    return tqdm(batchifier(), total=total)
 
 
-def export_marching_cubes(model, config_args, cfg, device):
-    # Mesh Extraction
-    N = config_args.res
-    iso_value = config_args.iso_level
-    batch_size = 1024
-    density_samples_count = 6
-    chunk = int(density_samples_count / 2)
-    gap = 1e0
-    gap_samples = 128
-    distance_length = 0.001
-    distance_threshold = 0.001
-    view_disparity = 1e-3
-    limit = config_args.limit
-    sampling_method = 0
-    dynamic_disparity = False
-    with_view_dependence = True
-    adjust_normals = False
+def extract_radiance(model, args, device, nums):
+    assert (isinstance(nums, tuple) or isinstance(nums, list) or isinstance(nums, int)), \
+        "Nums arg should be either iterable or int."
 
-    vertices, triangles, normals, diffuse = None, None, None, None
-    mesh_cache_path = os.path.join(config_args.save_dir, "mesh_cache.pt")
-    if config_args.cache_mesh:
-        print("Generating mesh geometry...")
-
-        if config_args.super_sampling >= 1:
-            pass
-            # grid_alpha_x, pts_flat_x = sample_points((N + (N - 1) * config_args.super_sampling, N, N), batch_size, device,
-            #                                          model, limit)
-            # grid_alpha_y, pts_flat_y = sample_points((N, N + (N - 1) * config_args.super_sampling, N), batch_size, device,
-            #                                          model, limit)
-            # grid_alpha_z, pts_flat_z = sample_points((N, N, N + (N - 1) * config_args.super_sampling), batch_size, device,
-            #                                          model, limit)
-            # if iso_value is None:
-            #     iso_value_x = np.maximum(grid_alpha_x, 0).mean()
-            #     iso_value_y = np.maximum(grid_alpha_x, 0).mean()
-            #     iso_value_z = np.maximum(grid_alpha_x, 0).mean()
-            #     iso_value = np.mean([iso_value_x, iso_value_y, iso_value_z])
-            #
-            # print("Iso-Value:", iso_value)
-            # vertices, triangles = mcubes.marching_cubes_super_sampling(grid_alpha_x, grid_alpha_y, grid_alpha_z,
-            #                                                            iso_value)
-            # vertices = np.ascontiguousarray(vertices)
-            # mcubes.export_obj(vertices, triangles, os.path.join(config_args.save_dir, "mesh.obj"))
-            # return
-        else:
-            # Extract model geometry
-            vertices, triangles, normals, grid_alpha, pts_flat, density = extract_geometry(model, N, batch_size, limit,
-                                                                                           iso_value)
-
-            # targets = torch.from_numpy(vertices) / N * 2 * limit - limit
-            inv_normals = -normals
-
-            # Reorder coordinates
-            inv_normals = inv_normals[:, [1, 0, 2]]
-
-            if adjust_normals:
-                adjusting_normals(config_args, density, N, chunk, density_samples_count, distance_length,
-                                  limit, normals, pts_flat, sampling_method, vertices, distance_threshold)
-
-        torch.save((vertices, triangles, normals), mesh_cache_path)
-        print("Mesh geometry saved successfully")
+    if isinstance(nums, int):
+        nums = (nums,) * 3
     else:
-        print("Loading mesh geometry...")
-        vertices, triangles, normals = torch.load(mesh_cache_path)
+        assert (len(nums) == 3), "Nums arg should be of length 3, number of axes for 3D"
 
-    # Extracting the diffuse color
-    # Ray targets
-    targets = vertices
+    # Create sample tiles
+    tiles = [torch.linspace(-args.limit, args.limit, num) for num in nums]
 
-    # Swap x-axis and y-axis
-    targets = targets[:, [1, 0, 2]]
+    # Generate 3D samples
+    samples = torch.stack(torch.meshgrid(*tiles), -1).view(-1, 3).float()
 
-    # Ray directions
-    directions = normals
+    radiance_samples = []
+    for (samples,) in batchify(samples, batch_size=args.batch_size, device=device):
+        # Query radiance batch
+        radiance_batch = model.sample_points(samples, samples)
 
-    # Query directly without specific-views
-    if not with_view_dependence:
-        diffuse = np.zeros((len(targets), 3))
-        for idx in tqdm(range(0, len(targets) // batch_size + 1)):
-            offset1 = batch_size * idx
-            offset2 = np.minimum(batch_size * (idx + 1), len(vertices))
-            pos_batch = targets[offset1:offset2].to(device)
-            normal_batch = inv_normals[offset1:offset2].to(device)
-            result_batch = model.sample_points(pos_batch, normal_batch)
-            # result_batch = model.sample_points(pos_batch, None)
+        # Accumulate radiance
+        radiance_samples.append(radiance_batch.cpu())
 
-            # Current color hack since the network does not normalize colors
-            result_batch = result_batch[..., :3]
-            # Query the whole diffuse map
-            diffuse[offset1:offset2] = result_batch[..., :3].cpu().detach().numpy()
-    else:
-        # Move ray origins slightly towards positive sdf
-        ray_origins = targets - view_disparity * inv_normals
+    # Radiance 3D grid (rgb + density)
+    radiance = torch.cat(radiance_samples, 0).view(*nums, 4).contiguous().numpy()
 
-        if dynamic_disparity:
-            # Create some density samples
-            density_samples = torch.linspace(1e-3, gap, gap_samples).repeat(targets.shape[0], 1)[..., None]
-            density_points = targets[:, None, :] + density_samples * directions[:, None, :]
-            density_indices = ((density_points + limit) / (2 * limit) * N).long().clamp_(0, N - 1)
-            indices = (density_indices.view(-1, 3)[:, [1, 0, 2]] * (N ** torch.arange(2, -1, -1))[None, :]).sum(-1)
-
-            tn_density = torch.from_numpy(density)
-            tn_samples = tn_density[indices].view(targets.shape[0], gap_samples)
-            # tn_attenut = (tn_samples * cumprod_exclusive(tn_samples >= 0))
-            tn_attenut = tn_samples * cumprod_exclusive(torch.relu(tn_samples))
-            tn_discrip = (tn_attenut > 1e-13).sum(-1)
-            tn_offset = tn_discrip[:, None].float() / gap_samples * gap
-            view_disparity = torch.max(tn_offset, torch.ones((targets.shape[0], 1)) * view_disparity)
-
-            # Careful, do not set the near plane to zero!
-            ray_bounds = (view_disparity * 2).expand(view_disparity.shape[0], 2).clone()
-            ray_bounds[:, 0] = 0.001
-        else:
-            ray_bounds = (
-                torch.tensor([0.001, 2 * view_disparity], dtype=ray_origins.dtype)
-                    .expand(ray_origins.shape[0], 2)
-            )
-
-        # Generating ray batches
-        rays = torch.cat((ray_origins, ray_bounds), dim=-1)
-        if cfg.nerf.use_viewdirs:
-            # Provide ray directions as input
-            rays = torch.cat((rays, inv_normals), dim=-1)
-
-        ray_batches = get_minibatches(rays, chunksize=batch_size)
-
-        pred = []
-        print("Started ray-casting")
-        for ray_batch in tqdm(ray_batches):
-            # move to appropriate device
-            ray_batch = ray_batch.to(device)
-            bray_origins, bray_bounds, bray_directions = ray_batch[..., :3], ray_batch[..., 3:5], ray_batch[..., 5:8]
-
-            diffuse, _ = model.forward((bray_origins, bray_directions, bray_bounds.transpose(0, 1)))
-            pred.append(diffuse.cpu().detach())
-
-        # Query the whole diffuse map
-        diffuse = torch.cat(pred, dim=0).numpy()
-
-    # Export model
-    print("Saving final model...", end="")
-    export_obj(vertices, triangles, diffuse, normals, os.path.join(config_args.save_dir, "mesh.obj"))
-    print("Saved!")
+    return radiance
 
 
-# model, N = 400, batch_size = 4096, limit = 1.2, iso_value = 32
-def sample_points(N, batch_size, device, model, limit, color=False):
-    if isinstance(N, tuple):
-        x, y, z = N
-        t_x = np.linspace(-limit, limit, x)
-        t_y = np.linspace(-limit, limit, y)
-        t_z = np.linspace(-limit, limit, z)
-        query_pts = np.stack(np.meshgrid(t_y, t_x, t_z), -1).astype(np.float32)
-    else:
-        x, y, z = N, N, N
-        t = np.linspace(-limit, limit, N)
-        query_pts = np.stack(np.meshgrid(t, t, t), -1).astype(np.float32)
-
-    pts = torch.from_numpy(query_pts)
-    dimension = pts.shape[-1]
-    pts_flat = pts.reshape((-1, dimension))
-    pts_flat_batch = pts_flat.reshape((-1, batch_size, dimension))
-
-    density = np.zeros((pts_flat.shape[0]))
-    if color:
-        colors = np.zeros((pts_flat.shape[0], 3))
-    for idx, batch in enumerate(tqdm(pts_flat_batch)):
-        batch = batch.to(device)
-        result_batch = model.sample_points(
-            batch, batch
-        )  # Reuse positions as fake rays
-
-        # Extracting the density
-        density[idx * batch_size: (idx + 1) * batch_size] = (
-            result_batch[..., 3].cpu().detach().numpy()
-        )
-
-        if color:
-            colors[idx * batch_size: (idx + 1) * batch_size] = (
-                result_batch[..., :3].cpu().detach().numpy()
-            )
-
-    # Create a 3D density grid
-    grid_alpha = density.reshape((x, y, z))
-    if color:
-        grid_color = colors.reshape((x, y, z, 3))
-        return grid_alpha, grid_color, pts_flat
-
-    return grid_alpha, pts_flat, density
-
-
-def extract_geometry(model, N=400, batch_size=4096, limit=1.2, iso_value=32):
-    # Sample points based on the grid
-    grid_alpha, pts_flat, density = sample_points(N, batch_size, device, model, limit)
+def extract_iso_level(density, args):
+    # Density boundaries
+    min_a, max_a, std_a = density.min(), density.max(), density.std()
 
     # Adaptive iso level
-    min_a, max_a, std_a = grid_alpha.min(), grid_alpha.max(), grid_alpha.std()
-    iso_value = min(max(iso_value, min_a + std_a), max_a - std_a)
-    print(f"Min density {min_a}, Max density: {max_a}, Mean density {grid_alpha.mean()}")
+    iso_value = min(max(args.iso_level, min_a + std_a), max_a - std_a)
+    print(f"Min density {min_a}, Max density: {max_a}, Mean density {density.mean()}")
     print(f"Querying based on iso level: {iso_value}")
 
-    # Extracting iso-surface triangulated
-    vertices, triangles, normals, values = measure.marching_cubes(grid_alpha, iso_value)
+    return iso_value
 
+
+def extract_geometry(model, device, args):
+    # Sample points based on the grid
+    radiance = extract_radiance(model, args, device, args.res)
+
+    # Density grid
+    density = radiance[..., 3]
+
+    # Adaptive iso level
+    iso_value = extract_iso_level(density, args)
+
+    # Extracting iso-surface triangulated
+    results = measure.marching_cubes(density, iso_value)
+
+    # Use contiguous tensors
+    vertices, triangles, normals, _ = [torch.from_numpy(np.ascontiguousarray(result)) for result in results]
+
+    # Use contiguous tensors
     normals = torch.from_numpy(np.ascontiguousarray(normals))
-    vertices = torch.from_numpy(np.ascontiguousarray(vertices)) / N * 2 * limit - limit
+    vertices = torch.from_numpy(np.ascontiguousarray(vertices))
     triangles = torch.from_numpy(np.ascontiguousarray(triangles))
 
-    return vertices, triangles, normals, grid_alpha, pts_flat, density
+    # Normalize vertices, to the (-limit, limit)
+    vertices = args.limit * (vertices / (args.res / 2.) - 1.)
+
+    return vertices, triangles, normals, density
+
+
+def extract_geometry_with_super_sampling(model, device, args):
+    raise NotImplementedError
+    try:
+        mcubes = import_module("marching_cubes")
+    except ModuleNotFoundError:
+        print("""
+            Run the following instructions within your environment:
+            https://github.com/JustusThies/PyMarchingCubes#installation
+        """)
+
+        # Close process
+        exit(-1)
+
+    # Sampling resolution per axis
+    nums = np.array([args.res + (args.res - 1) * args.super_sampling, args.res, args.res])
+
+    # Radiance per axis, super sampling across each axis
+    radiances = []
+    for i in range(0, 3):
+        # Roll such that each axis is rich
+        radiance_axis = extract_radiance(model, args, device, np.roll(nums, i))[..., 3]
+
+        radiances.append(radiance_axis)
+
+    # accumulate
+    density = np.stack(radiances, axis=0)
+
+    # Adaptive iso level
+    iso_value = extract_iso_level(density, args)
+
+    vertices, triangles = mcubes.marching_cubes_super_sampling(*radiances, iso_value)
+
+    vertices = np.ascontiguousarray(vertices)
+    mcubes.export_obj(vertices, triangles, os.path.join(args.save_dir, "mesh.obj"))
+
+
+def export_marching_cubes(model, args, cfg, device):
+    # Mesh Extraction
+
+    if args.super_sampling >= 1:
+        print("Generating mesh geometry...")
+
+        # Extract model geometry with super sampling across each axis
+        extract_geometry_with_super_sampling(model, device, args)
+        return
+
+    # Cached mesh path containing data
+    mesh_cache_path = os.path.join(args.save_dir, args.cache_name)
+
+    cached_mesh_exists = os.path.exists(mesh_cache_path)
+    cache_new_mesh = args.use_cached_mesh and not cached_mesh_exists
+    if cache_new_mesh:
+        print(f"Cached mesh does not exist - {mesh_cache_path}")
+
+    if args.use_cached_mesh and cached_mesh_exists:
+        print("Loading cached mesh geometry...")
+        vertices, triangles, normals, density = torch.load(mesh_cache_path)
+    else:
+        print("Generating mesh geometry...")
+        # Extract model geometry
+        vertices, triangles, normals, density = extract_geometry(model, device, args)
+
+        if cache_new_mesh or args.override_cache_mesh:
+            torch.save((vertices, triangles, normals, density), mesh_cache_path)
+            print(f"Cached mesh geometry saved to {mesh_cache_path}")
+
+    # Extracting the mesh appearance
+
+    # Ray targets and directions
+    targets, directions = vertices, -normals
+
+    diffuse = []
+    if args.no_view_dependence:
+        print("Diffuse map query directly  without specific-views...")
+        # Query directly without specific-views
+        batch_generator = batchify(targets, directions, batch_size=args.batch_size, device=device)
+        for (pos_batch, dir_batch) in batch_generator:
+            # Diffuse batch queried
+            diffuse_batch = model.sample_points(pos_batch, dir_batch)[..., :3]
+
+            # Accumulate diffuse
+            diffuse.append(diffuse_batch.cpu())
+    else:
+        print("Diffuse map query with view dependence...")
+        ray_bounds = torch.tensor([0., args.view_disparity_max_bound], dtype=directions.dtype)
+
+        # Eases batchifying
+        ray_bounds = ray_bounds.expand(directions.shape[0], 2)
+
+        # Query with view dependence
+        # Move ray origins slightly towards negative sdf
+        ray_origins = targets - args.view_disparity * directions
+
+        print("Started ray-casting")
+        batch_generator = batchify(ray_origins, directions, ray_bounds, batch_size=args.batch_size, device=device)
+        for (ray_origins, ray_directions, ray_bounds) in batch_generator:
+            # View dependent diffuse batch queried
+            diffuse_batch = model.query_diffuse((ray_origins, ray_directions, ray_bounds.transpose(0, 1)))
+
+            # Accumulate diffuse
+            diffuse.append(diffuse_batch.cpu())
+
+    # Query the whole diffuse map
+    diffuse = torch.cat(diffuse, dim=0).numpy()
+
+    # Target mesh path
+    mesh_path = os.path.join(args.save_dir, args.mesh_name)
+
+    # Export model
+    export_obj(vertices, triangles, diffuse, normals, mesh_path)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--config", type=str, required=True, help="Path to (.yml) config file."
+        "--log-checkpoint", type=str, default=None,
+        help="Training log path with the config and checkpoints to load existent configuration.",
     )
     parser.add_argument(
-        "--checkpoint",
-        type=str,
-        required=True,
-        help="Checkpoint / pre-trained model to evaluate.",
+        "--checkpoint", type=str, default="model_last.ckpt",
+        help="Load existent configuration from the latest checkpoint by default.",
     )
     parser.add_argument(
-        "--save-dir", type=str, help="Save mesh to this directory, if specified.", default="."
+        "--save-dir", type=str, default=".",
+        help="Save mesh to this directory, if specified.",
     )
     parser.add_argument(
-        "--iso-level",
-        type=float,
-        help="Iso-Level to be queried",
-        default=32
+        "--mesh-name", type=str, default="mesh.obj",
+        help="Mesh name to be generated.",
     )
     parser.add_argument(
-        "--limit",
-        type=float,
-        help="Limits in -xyz to xyz for mcubes.",
-        default=1.2
+        "--iso-level", type=float, default=32,
+        help="Iso-level value for triangulation",
     )
     parser.add_argument(
-        "--res",
-        type=int,
-        help="Sampling resolution for mcubes.",
-        default=128
+        "--limit", type=float, default=1.2,
+        help="Limits in -xyz to xyz for marching cubes 3D grid.",
     )
     parser.add_argument(
-        "--super-sampling",
-        type=int,
+        "--res", type=int, default=128,
+        help="Sampling resolution for marching cubes, increase it for higher level of detail.",
+    )
+    parser.add_argument(
+        "--super-sampling", type=int, default=0,
         help="Add super sampling along the edges.",
-        default=0,
     )
-    parser.add_argument('--no-cache-mesh', dest='cache_mesh', action='store_false')
-    parser.set_defaults(no_cache_mesh=True)
-
+    parser.add_argument(
+        "--batch-size", type=int, default=1024,
+        help="Higher batch size results in faster processing but needs more device memory.",
+    )
+    parser.add_argument(
+        "--no-view-dependence", action="store_true", default=False,
+        help="Disable view dependent appearance, use sampled diffuse color based on the grid"
+    )
+    parser.add_argument(
+        "--view-disparity", type=float, default=1e-2,
+        help="Ray origins offset from target based on the inverse normal for the view dependent appearance.",
+    )
+    parser.add_argument(
+        "--view-disparity-max-bound", type=float, default=4e0,
+        help="Far max possible bound, usually set to (cfg.far - cfg.near), lower it for better "
+             "appearance estimation when using higher resolution e.g. at least view_disparity * 2.0.",
+    )
+    parser.add_argument(
+        "--use-cached-mesh", action="store_true", default=False,
+        help="Use the cached mesh.",
+    )
+    parser.add_argument(
+        "--override-cache-mesh", action="store_true", default=False,
+        help="Caches the mesh, useful for rapid configuration appearance tweaking.",
+    )
+    parser.add_argument(
+        "--cache-name", type=str, default="mesh_cache.pt",
+        help="Mesh cache name, allows for multiple unique meshes of different resolutions.",
+    )
     config_args = parser.parse_args()
-    log_folder = Path(config_args.config)
-    with log_folder.open() as f:
-        hparams = yaml.load(f, Loader=yaml.FullLoader)
-        cfg = CfgNode(nest_dict(hparams, sep="."))
 
+    # Existent log path
+    path_parser = PathParser()
+    cfg, _ = path_parser.parse(None, config_args.log_checkpoint, None, config_args.checkpoint)
+
+    # Available device
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    checkpoint_path = config_args.checkpoint
-    model = getattr(models, cfg.experiment.model).load_from_checkpoint(checkpoint_path)
-    model.eval()
-    model.to(device)
+    # Load model checkpoint
+    print(f"Loading model from {path_parser.checkpoint_path}")
+    model = getattr(models, cfg.experiment.model).load_from_checkpoint(path_parser.checkpoint_path)
+    model = model.eval().to(device)
 
-    export_marching_cubes(model, config_args, cfg, device)
+    with torch.no_grad():
+        # Perform marching cubes and export the mesh
+        export_marching_cubes(model, config_args, cfg, device)

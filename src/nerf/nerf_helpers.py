@@ -108,7 +108,7 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 
             fh.write("\n")
 
-    print('Finished writing to obj')
+    print(f"Finished writing to {filename} with {len(vertices)} vertices")
 
 
 def export_point_cloud(it, ray_origins, ray_directions, depth_fine, dep_target):

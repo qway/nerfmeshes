@@ -18,6 +18,10 @@ experiment:
   print_every: 100
   # Base directory of mesh dataset.
   meshdir: ../data/meshes
+  # Training early stopping due to being stuck in local minima
+  use_early_stopping: False
+  # Early stopping step
+  early_stopping_step: 25
   # Compute chamfer loss
   chamfer_loss: False
   # Chamfer loss sampling size
@@ -161,8 +165,8 @@ scheduler:
   options:
     # Multiplicative factor of learning rate decay.
     gamma: 0.1
-    # Period of learning rate decay.
-    step_size: 250000
+    # Period of learning rate decay. train_iters * 180%
+    step_size: 450000
 
 # NeRF parameters.
 nerf:

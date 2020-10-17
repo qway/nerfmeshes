@@ -68,6 +68,12 @@ class BuFFModel(BaseModel):
 
         return rgb, depth
 
+    def query_diffuse(self, ray_batch):
+        # View dependent diffuse batch queried
+        diffuse_batch, _ = self.forward(ray_batch)
+
+        return diffuse_batch
+
     def training_step(self, ray_batch, batch_idx):
         # Unpacking bundle
         bundle = DataBundle.deserialize(ray_batch).to_ray_batch()
@@ -78,6 +84,10 @@ class BuFFModel(BaseModel):
             (bundle.ray_origins, bundle.ray_directions, bundle.ray_bounds)
         )
 
+        # Early stopping if the scene data is too sparse
+        self.check_early_stopping(rgb_chunk)
+
+        # Compute losses
         loss = self.loss(rgb_chunk, bundle.ray_targets)
         psnr = self.criterion_psnr(loss)
 

@@ -292,6 +292,60 @@ class BlenderDataset(SynthesizableDataset, CachingDataset):
                     self.save_dataset(sample, img_idx, batch_idx)
 
 
+class ColmapDataset(CachingDataset):
+    def __init__(self, cfg, spherify = True, type = DatasetType.TRAIN):
+        self.downscale_factor = cfg.dataset.llff_downsample_factor
+        self.spherify = spherify
+
+        super(ColmapDataset, self).__init__(cfg, type)
+        print("Loading Colmap Data...")
+
+    def load_dataset(self):
+        images, poses, bounds, render_poses, i_test = load_llff_data(
+            self.dataset_path, factor = self.downscale_factor, spherify = self.spherify
+        )
+
+        samples_hold_count = self.cfg.dataset.llff_hold_step
+        if samples_hold_count > 0:
+            val_indices = np.arange(images.shape[0])[::samples_hold_count]
+        else:
+            val_indices = np.array([ i_test ])
+
+        train_indices = np.array([ i for i in np.arange(images.shape[0]) if i not in val_indices ])
+        target_indices = train_indices if self.type == DatasetType.TRAIN else val_indices
+
+        poses = torch.from_numpy(poses[target_indices, ...])
+        bounds = torch.from_numpy(bounds[target_indices, ...])
+        images = images[target_indices, ...]
+
+        poses, hwf = poses[:, :3, :4], poses[0, :3, -1]
+
+        return images, poses, hwf, bounds
+
+    def cache_dataset(self):
+        pass
+    # def __len__(self):
+    #     if self.num_random_rays >= 0:
+    #         return int(self.ray_targets.shape[0] / self.num_random_rays)
+    #     else:
+    #         return self.ray_targets.shape[0]
+    #
+    # def __getitem__(self, idx):
+    #     if idx >= self.__len__():
+    #         raise IndexError("Not a valid batch number!")
+    #     if self.num_random_rays >= 0:
+    #         start = idx * self.num_random_rays
+    #         indices = slice(start, start + self.num_random_rays)
+    #     else:
+    #         indices = slice(idx, idx + 1)
+    #     # Select pose and image
+    #     ray_origin = self.all_ray_origins[indices]
+    #     ray_direction = self.all_ray_directions[indices]
+    #     ray_target = self.ray_targets[indices]
+    #     ray_bounds = self.ray_bounds[indices]
+    #     return (ray_origin, ray_direction, ray_bounds, ray_target)
+
+
 class ScanNetDataset(Dataset):
     def __init__(
             self,
@@ -396,7 +450,7 @@ class ScanNetDataset(Dataset):
             return ray_positions, ray_directions, self.ray_bounds, image
 
 
-class ColmapDataset(Dataset):
+class GeneralColmapDataset(Dataset):
     """
     A basic pytorch dataset for NeRF based on colmap data.
     """
@@ -412,7 +466,7 @@ class ColmapDataset(Dataset):
             stop = None,
             downscale_factor = 1.0
     ):
-        super(ColmapDataset, self).__init__()
+        super(GeneralColmapDataset, self).__init__()
         resolution = 1 / downscale_factor
         self.num_random_rays = num_random_rays
         if config_folder_path is not Path:
@@ -513,75 +567,3 @@ class ColmapDataset(Dataset):
         ray_target = self.ray_targets[indices]
         ray_bounds = self.ray_bounds
         return (ray_origin, ray_direction, ray_bounds, ray_target)
-
-
-class LLFFDataset(CachingDataset):
-    def __init__(self, cfg, spherify = True, type = DatasetType.TRAIN):
-        self.downscale_factor = cfg.dataset.llff_downsample_factor
-        self.spherify = spherify
-
-        super(LLFFDataset, self).__init__(cfg, type)
-        print("Loading LLFF Data...")
-
-    def load_dataset(self):
-        images, poses, bounds, render_poses, i_test = load_llff_data(
-            self.dataset_path, factor = self.downscale_factor, spherify = self.spherify
-        )
-
-        samples_hold_count = self.cfg.dataset.llff_hold_step
-        if samples_hold_count > 0:
-            val_indices = np.arange(images.shape[0])[::samples_hold_count]
-        else:
-            val_indices = np.array([ i_test ])
-
-        train_indices = np.array([ i for i in np.arange(images.shape[0]) if i not in val_indices ])
-        target_indices = train_indices if self.type == DatasetType.TRAIN else val_indices
-
-        poses = torch.from_numpy(poses[target_indices, ...])
-        bounds = torch.from_numpy(bounds[target_indices, ...])
-        images = images[target_indices, ...]
-
-        poses, hwf = poses[:, :3, :4], poses[0, :3, -1]
-
-        return images, poses, hwf, bounds
-
-    def cache_dataset(self):
-        pass
-    # def __len__(self):
-    #     if self.num_random_rays >= 0:
-    #         return int(self.ray_targets.shape[0] / self.num_random_rays)
-    #     else:
-    #         return self.ray_targets.shape[0]
-    #
-    # def __getitem__(self, idx):
-    #     if idx >= self.__len__():
-    #         raise IndexError("Not a valid batch number!")
-    #     if self.num_random_rays >= 0:
-    #         start = idx * self.num_random_rays
-    #         indices = slice(start, start + self.num_random_rays)
-    #     else:
-    #         indices = slice(idx, idx + 1)
-    #     # Select pose and image
-    #     ray_origin = self.all_ray_origins[indices]
-    #     ray_direction = self.all_ray_directions[indices]
-    #     ray_target = self.ray_targets[indices]
-    #     ray_bounds = self.ray_bounds[indices]
-    #     return (ray_origin, ray_direction, ray_bounds, ray_target)
-
-
-def tensor_to_pcloud_point(x, c):
-    return f"{x[0]};{x[1]};{x[2]};{c[0]};{c[1]};{c[2]}"
-
-
-def rays_to_pcloud_string(ray_origin, ray_direction, ray_bounds, ray_target):
-    if ray_target.shape[0] == 1:
-        ray_origin, ray_direction, ray_bounds, ray_target = ray_origin[0], ray_direction[0], ray_bounds[0], ray_target[
-            0]
-    rays = [tensor_to_pcloud_point(rorg + rdir, rtar) for rorg, rdir, rtar in
-            zip(ray_origin, ray_direction, ray_target)]
-    rays += [tensor_to_pcloud_point(rorg, (0, 0, 0)) for rorg in ray_origin]
-    return """""".join(rays)
-
-
-def data_set_to_pcloud_string(dataset):
-    return "\n".join([rays_to_pcloud_string(*data) for data in dataset])
