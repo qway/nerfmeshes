@@ -1,4 +1,4 @@
-from dataclasses import astuple, dataclass, field, fields
+from dataclasses import astuple, dataclass, fields
 from typing import Dict
 
 import torch
@@ -33,7 +33,7 @@ def pose_spherical(theta, phi, radius):
     c2w = rotate_by_phi_along_x(phi / 180.0 * np.pi) @ c2w
     c2w = rotate_by_theta_along_y(theta / 180 * np.pi) @ c2w
     c2w = np.array([[-1, 0, 0, 0], [0, 0, 1, 0], [0, 1, 0, 0], [0, 0, 0, 1]]) @ c2w
-    return c2w
+    return c2w.astype(np.float32)
 
 
 def batch_random_sampling(cfg, coords, ray_bundle: tuple):
@@ -134,8 +134,10 @@ class DataBundle:
         """ Removes all unnecessary dimensions from a ray batch. """
         self.ray_origins = self.ray_origins.view(-1, 3)
         self.ray_directions = self.ray_directions.view(-1, 3)
-        self.ray_targets = self.ray_targets.view(-1, 3)
         self.ray_bounds = self.ray_bounds.view(2)
+
+        if self.ray_targets is not None:
+            self.ray_targets = self.ray_targets.view(-1, 3)
 
         if self.target_depth is not None:
             self.target_depth = self.target_depth.view(-1)

@@ -131,8 +131,7 @@ class TreeSampling:
             voxel_count_initial = voxels_indices.shape[0]
             voxel_count_filtered = (~mask_voxels).sum()
             voxel_count_current = len(mask_voxels_list)
-            print(
-                f"From {voxel_count_initial} voxels with {voxel_count_filtered} filtered to current {voxel_count_current}")
+            print(f"From {voxel_count_initial} voxels with {voxel_count_filtered} filtered to current {voxel_count_current}")
 
             # Nodes closer to the root with high weight have higher priority
             voxels_filtered = [ self.root.children[index] for index in mask_voxels_list ]

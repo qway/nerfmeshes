@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import torchvision
 
-from typing import Optional
+from tqdm import tqdm
 
 POINT_GROUND_TRUTH = torch.tensor([ 0., 0., 255. ])
 POINT_OUT_TRUE = torch.tensor([ 0., 255., 0. ])
@@ -111,6 +111,34 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
     print(f"Finished writing to {filename} with {len(vertices)} vertices")
 
 
+def batchify(*data, batch_size=1024, device="cpu", progress=True):
+    assert all(sample is None or sample.shape[0] == data[0].shape[0] for sample in data), \
+        "Sizes of tensors must match for dimension 0."
+
+    # Custom batchifier
+    def batchifier():
+        # Data size and current batch offset
+        size, batch_offset = data[0].shape[0], 0
+
+        while batch_offset < size:
+            # Subsample slice
+            batch_slice = slice(batch_offset, batch_offset + batch_size)
+
+            # Yield each subsample, and move to available device
+            yield [sample[batch_slice].to(device) if sample is not None else sample for sample in data]
+
+            batch_offset += batch_size
+
+    iterator = batchifier()
+    if not progress:
+        return iterator
+
+    # Total batches
+    total = (data[0].shape[0] - 1) // batch_size + 1
+
+    return tqdm(iterator, total=total)
+
+
 def export_point_cloud(it, ray_origins, ray_directions, depth_fine, dep_target):
     vertices_output = (ray_origins + ray_directions * depth_fine[..., None]).view(-1, 3)
     vertices_target = (ray_origins + ray_directions * dep_target[..., None]).view(-1, 3)
@@ -124,31 +152,33 @@ def export_point_cloud(it, ray_origins, ray_directions, depth_fine, dep_target):
     export_obj(vertices, [], diffuse, normals, f"{it:04d}.obj")
 
 
-def cast_to_image(tensor):
+def cast_to_pil_image(tensor):
     # Input tensor is (H, W, 3). Convert to (3, H, W).
     tensor = tensor.permute(2, 0, 1)
-    # Conver to PIL Image and then np.array (output shape: (H, W, 3))
+    # Convert to PIL Image and then np.array (output shape: (H, W, 3))
     img = np.array(torchvision.transforms.ToPILImage()(tensor.detach().cpu().float()))
+    return img
+
+
+def cast_to_image(tensor):
+    # Extract the PIL Image (output shape: (H, W, 3))
+    img = cast_to_pil_image(tensor)
+
     # Map back to shape (3, H, W), as tensorboard needs channels first.
     img = np.moveaxis(img, [-1], [0])
     return img
 
 
-def cast_to_disparity_image(tensor):
-    # Input tensor is (H, W). Convert to (1, H, W).
+def cast_to_disparity_image(tensor, white_background = False):
+    # Input tensor is (H, W).
     img = (tensor - tensor.min()) / (tensor.max() - tensor.min())
-    img = img.clamp(0, 1) * 255
-    img = img.unsqueeze(0).numpy().astype(np.uint8)
-    img = img.detach().cpu()
-    return img
+    img = (img.clamp(0., 1.) * 255).byte()
 
+    if white_background:
+        # Apply white background
+        img[img == 0] = 255
 
-def get_minibatches(inputs: torch.Tensor, chunksize: Optional[int] = 1024 * 8):
-    r"""Takes a huge tensor (ray "bundle") and splits it into a list of minibatches.
-    Each element of the list (except possibly the last) has dimension `0` of length
-    `chunksize`.
-    """
-    return [inputs[i: i + chunksize] for i in range(0, inputs.shape[0], chunksize)]
+    return img.detach().cpu().numpy()
 
 
 def meshgrid_xy(
@@ -164,8 +194,6 @@ def meshgrid_xy(
     # TESTED
     ii, jj = torch.meshgrid(tensor1, tensor2)
     return ii.transpose(-1, -2), jj.transpose(-1, -2)
-
-index = 0
 
 
 def cumprod_exclusive(tensor: torch.Tensor) -> torch.Tensor:
@@ -249,65 +277,6 @@ def get_ray_bundle(
     return ray_origins, ray_directions
 
 
-def positional_encoding(
-        tensor, num_encoding_functions = 6,
-        include_input = True,
-        log_sampling = True
-) -> torch.Tensor:
-    r"""Apply positional encoding to the input.
-
-    Args:
-        tensor (torch.Tensor): Input tensor to be positionally encoded.
-        encoding_size (optional, int): Number of encoding functions used to compute
-            a positional encoding (default: 6).
-        include_input (optional, bool): Whether or not to include the input in the
-            positional encoding (default: True).
-
-    Returns:
-    (torch.Tensor): Positional encoding of the input tensor.
-    """
-    # TESTED
-    # Trivially, the input tensor is added to the positional encoding.
-    encoding = [tensor] if include_input else []
-    frequency_bands = None
-    if log_sampling:
-        frequency_bands = 2.0 ** torch.linspace(
-            0.0,
-            num_encoding_functions - 1,
-            num_encoding_functions,
-            dtype = tensor.dtype,
-            device = tensor.device,
-        )
-    else:
-        frequency_bands = torch.linspace(
-            2.0 ** 0.0,
-            2.0 ** (num_encoding_functions - 1),
-            num_encoding_functions,
-            dtype = tensor.dtype,
-            device = tensor.device,
-        )
-
-    for freq in frequency_bands:
-        for func in [torch.sin, torch.cos]:
-            encoding.append(func(tensor * freq))
-
-    # Special case, for no positional encoding
-    if len(encoding) == 1:
-        return encoding[0]
-    else:
-        return torch.cat(encoding, dim = -1)
-
-
-def get_embedding_function(
-        num_encoding_functions = 6, include_input = True, log_sampling = True
-):
-    r"""Returns a lambda function that internally calls positional_encoding.
-    """
-    return lambda x: positional_encoding(
-        x, num_encoding_functions, include_input, log_sampling
-    )
-
-
 def ndc_rays(H, W, focal, near, rays_o, rays_d):
     # UNTESTED, but fairly sure.
 
@@ -336,73 +305,3 @@ def ndc_rays(H, W, focal, near, rays_o, rays_d):
     rays_d = torch.stack([d0, d1, d2], -1)
 
     return rays_o, rays_d
-
-
-if __name__ == "__main__":
-    # # meshgrid_xy
-    # i, j = np.meshgrid(np.arange(3), np.arange(4, 7), indexing='xy')
-    # print(i)
-    # print(j)
-    # ii, jj = torch.meshgrid(torch.arange(3), torch.arange(4, 7))
-    # print(ii.transpose(-1, -2))
-    # print(jj.transpose(-1, -2))
-    # ii, jj = meshgrid_xy(torch.arange(3), torch.arange(4, 7))
-    # print(ii)
-    # print(jj)
-
-    # # dirs (get_rays_np)
-    # H, W = 3, 3
-    # focal = 10
-    # i, j = np.meshgrid(np.arange(3), np.arange(4, 7), indexing='xy')
-    # dirs = np.stack([(i - W) * .5 / focal, -(j - H) * .5 / focal, -np.ones_like(i)], -1)
-    # print(dirs)
-    # ii, jj = meshgrid_xy(torch.arange(3).float(), torch.arange(4, 7).float())
-    # dirs_torch = torch.stack([(ii - W) * .5 / focal, -(jj - H) * .5 / focal, -torch.ones_like(ii)], -1)
-    # print(dirs_torch)
-    # print(np.allclose(dirs, dirs_torch.cpu().numpy()))
-
-    # # rays_o, rays_d (get_rays_np)
-    # H, W = 3, 3
-    # focal = 10
-    # c2w = np.eye(4)
-    # c2w[:3, :3] = 2 * c2w[:3, :3]
-    # i, j = np.meshgrid(np.arange(3), np.arange(4, 7), indexing='xy')
-    # dirs = np.stack([(i - W) * .5 / focal, -(j - H) * .5 / focal, -np.ones_like(i)], -1)
-    # rays_d = np.sum(dirs[..., np.newaxis, :] * c2w[:3, :3], -1)
-    # rays_o = np.broadcast_to(c2w[:3, -1], np.shape(rays_d))
-    # print(rays_d)
-    # print(rays_o)
-    # ii, jj = meshgrid_xy(torch.arange(3).float(), torch.arange(4, 7).float())
-    # dirs_torch = torch.stack([(ii - W) * .5 / focal, -(jj - H) * .5 / focal, -torch.ones_like(ii)], -1)
-    # c2w_torch = torch.eye(4)
-    # c2w_torch[:3, :3] = 2 * c2w_torch[:3, :3]
-    # rays_d_torch = torch.sum(dirs_torch[..., None, :] * c2w_torch[:3, :3], -1)
-    # rays_o_torch = c2w_torch[:3, -1].expand(rays_d_torch.shape)
-    # print(rays_d_torch)
-    # print(rays_o_torch)
-    # print(np.allclose(rays_d, rays_d_torch.cpu().numpy()))
-    # print(np.allclose(rays_o, rays_o_torch.cpu().numpy()))
-
-    # # get_rays(_torch) vs get_rays_np
-    # H, W = 3, 3
-    # focal = 10
-    # c2w = np.eye(4)
-    # c2w[:3, :3] = 2 * c2w[:3, :3]
-    # # c2w_torch = torch.eye(4)
-    # # c2w_torch[:3, :3] = 2 * c2w_torch[:3, :3]
-    # rays_o, rays_d = get_rays_np(H, W, focal, c2w)
-    # c2w_torch = torch.from_numpy(c2w)
-    # rays_o_torch, rays_d_torch = get_rays(H, W, focal, c2w_torch)
-    # print(np.allclose(rays_o, rays_o_torch.cpu().numpy()))
-    # print(np.allclose(rays_d, rays_d_torch.cpu().numpy()))  # Assert fails, values look different.
-    # print("Numpy version:")
-    # print(rays_d)
-    # print("PyTorch version:")
-    # print(rays_d_torch.cpu().numpy())
-
-    # Test backprop for sample_pdf()
-    bins = torch.rand(2, 4)
-    weights = torch.rand(2, 4)
-    weights.requires_grad = True
-    samples = sample_pdf(bins, weights, 10)
-    print(samples)

@@ -60,19 +60,17 @@ class BuFFModel(BaseModel):
 
         # Model inference
         radiance_field = self.model(ray_samples, expanded_ray_directions)
-        rgb, depth, weights, weights_mask = self.volume_renderer(radiance_field, ray_intervals, ray_directions)
+        bundle = self.volume_renderer(radiance_field, ray_intervals, ray_directions)
 
         if self.training:
             # Perform ray batch integration into the tree
-            self.tree.ray_batch_integration(self.global_step, indices, weights[mask].detach(), weights_mask[mask].detach())
+            self.tree.ray_batch_integration(self.global_step, indices, bundle.weights[mask].detach(), bundle.weights_mask[mask].detach())
 
-        return rgb, depth
+        return bundle
 
-    def query_diffuse(self, ray_batch):
-        # View dependent diffuse batch queried
-        diffuse_batch, _ = self.forward(ray_batch)
-
-        return diffuse_batch
+    def query(self, ray_batch):
+        # Fine query
+        return self.forward(ray_batch)
 
     def training_step(self, ray_batch, batch_idx):
         # Unpacking bundle
@@ -80,15 +78,13 @@ class BuFFModel(BaseModel):
         logger = self.logger.experiment
 
         # Forward pass
-        rgb_chunk, depth_chunk = self.forward(
-            (bundle.ray_origins, bundle.ray_directions, bundle.ray_bounds)
-        )
+        output_bundle = self.forward((bundle.ray_origins, bundle.ray_directions, bundle.ray_bounds))
 
         # Early stopping if the scene data is too sparse
-        self.check_early_stopping(rgb_chunk)
+        self.check_early_stopping(output_bundle.rgb_map)
 
         # Compute losses
-        loss = self.loss(rgb_chunk, bundle.ray_targets)
+        loss = self.loss(output_bundle.rgb_map, bundle.ray_targets)
         psnr = self.criterion_psnr(loss)
 
         log_vals = {
@@ -97,10 +93,10 @@ class BuFFModel(BaseModel):
         }
 
         # Depth consideration
-        log_vals = self.logger_depth_loss.tick(log_vals, rgb_chunk, bundle.ray_targets, depth_chunk, bundle.target_depth)
+        log_vals = self.logger_depth_loss.tick(log_vals, output_bundle.rgb_map, bundle.ray_targets, output_bundle.depth_map, bundle.target_depth)
 
         # Loggers
-        self.logger_depth_projection.tick(logger, self.global_step, bundle.ray_origins, bundle.ray_directions, depth_chunk, bundle.target_depth)
+        self.logger_depth_projection.tick(logger, self.global_step, bundle.ray_origins, bundle.ray_directions, output_bundle.depth_map, bundle.target_depth)
         self.logger_tree_weights.tick(logger, self.global_step, self.tree)
 
         # Tree consolidation
@@ -129,14 +125,13 @@ class BuFFModel(BaseModel):
 
         loss = 0.
         rgb_chunks = []
-        with torch.no_grad():
-            for i in range(0, bundle.ray_targets.shape[0], batch_size):
-                # re-usable slice
-                tn_slice = slice(i, i + batch_size)
+        for i in range(0, bundle.ray_targets.shape[0], batch_size):
+            # re-usable slice
+            tn_slice = slice(i, i + batch_size)
 
-                rgb_coarse, _ = self.forward((bundle.ray_origins, bundle.ray_directions[tn_slice], bundle.ray_bounds))
-                loss += self.loss(rgb_coarse, bundle.ray_targets[tn_slice])
-                rgb_chunks.append(rgb_coarse)
+            output_bundle = self.forward((bundle.ray_origins, bundle.ray_directions[tn_slice], bundle.ray_bounds))
+            loss += self.loss(output_bundle.rgb_map, bundle.ray_targets[tn_slice])
+            rgb_chunks.append(output_bundle.rgb_map)
 
         # Mean loss
         loss /= batch_count

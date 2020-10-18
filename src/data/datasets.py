@@ -35,12 +35,12 @@ def dummy_rays_simple_radial(height: int, width: int, camera, resolution):
     cx *= resolution
     cy *= resolution
     ii, jj = meshgrid_xy(
-        torch.arange(width, dtype = torch.float32),
-        torch.arange(height, dtype = torch.float32),
+        torch.arange(width, dtype=torch.float32),
+        torch.arange(height, dtype=torch.float32),
     )
 
     directions = torch.stack(
-        [(ii - cx) / f, (jj - cy) / f, torch.ones_like(ii), ], dim = -1,
+        [(ii - cx) / f, (jj - cy) / f, torch.ones_like(ii), ], dim=-1,
     )
 
     # directions /= torch.norm(directions, dim=-1)[...,None]
@@ -62,7 +62,7 @@ def convert_poses_to_rays(poses, H, W, focal):
     return ray_origins, ray_directions
 
 
-def get_rays(H, W, camera, poses, camera_model = "SIMPLE_RADIAL", resolution = 1.0):
+def get_rays(H, W, camera, poses, camera_model="SIMPLE_RADIAL", resolution=1.0):
     if camera_model == "SIMPLE_RADIAL":
         dummies = dummy_rays_simple_radial(H, W, camera, resolution)
     else:
@@ -71,7 +71,7 @@ def get_rays(H, W, camera, poses, camera_model = "SIMPLE_RADIAL", resolution = 1
     all_ray_directions = []
     for pose in poses:
         ray_directions = torch.sum(dummies[..., None, :] * pose[:3, :3],
-                                   dim = -1).float()
+                                   dim=-1).float()
         ray_origins = (pose[:3, -1]).expand(ray_directions.shape).float()
 
         all_ray_origins.append(ray_origins)
@@ -83,37 +83,57 @@ def get_rays(H, W, camera, poses, camera_model = "SIMPLE_RADIAL", resolution = 1
 
 class SynthesizableDataset(Dataset):
 
-    def __init__(self, cfg, type):
-        super(SynthesizableDataset, self).__init__(cfg, type)
-        self.cfg, self.type = cfg, type
+    STEP_SIZE = 3
 
-        # Synthetic mesh target
-        self.target_mesh = None
+    def __init__(self):
+        super(SynthesizableDataset, self).__init__()
 
-        # Mesh path
-        model_path = Path(self.cfg.dataset.basedir) / f"model.obj"
+        # # Synthetic mesh target
+        # self.target_mesh = None
+        #
+        # # Mesh path
+        # model_path = Path(self.cfg.dataset.basedir) / f"model.obj"
+        #
+        # if os.path.exists(model_path):
+        #     print("Loading 3D mesh...")
+        #     # Loading target 3D mesh
+        #     verts, faces, _ = load_obj(model_path)
+        #
+        #     # Find the faces and vertices
+        #     faces_idx = faces.verts_idx
+        #
+        #     # Target mesh
+        #     self.target_mesh = create_mesh(verts, faces_idx)
 
-        if os.path.exists(model_path):
-            # Loading target 3D mesh
-            verts, faces, _ = load_obj(model_path)
+    def synthesis(self):
+        print("Synthesizing dataset...")
 
-            # Find the faces and vertices
-            faces_idx = faces.verts_idx
+        # Rotation lin samples around y-axis
+        rot_samples = np.linspace(-270, 90, (360 // SynthesizableDataset.STEP_SIZE), endpoint=False)
 
-            # Target mesh
-            self.target_mesh = create_mesh(verts, faces_idx)
-
-        # Synthesize novel 3D poses
-        self.render_poses = torch.stack(
+        # Synthesizable 3D poses, 360° around the scene
+        poses = torch.stack(
             [
                 torch.from_numpy(pose_spherical(angle, -30.0, 4.0))
-                for angle in np.linspace(-180, 180, 40 + 1)[:-1]
-            ],
-            0,
+                for angle in rot_samples
+            ], 0,
+        )
+
+        # Synthetic data bundle
+        self.synthetic_bundle = DataBundle(
+            poses=poses,
+            ray_bounds=self.ray_bounds,
+            hwf=self.data_bundle.hwf,
+            size=len(poses)
+        )
+
+        # Get synthetic ray origins and directions
+        self.synthetic_bundle.ray_origins, self.synthetic_bundle.ray_directions = convert_poses_to_rays(
+            poses, *self.data_bundle.hwf
         )
 
 
-class CachingDataset(Dataset):
+class CachingDataset(SynthesizableDataset, Dataset):
 
     def __init__(self, cfg, type):
         super(CachingDataset, self).__init__()
@@ -125,11 +145,14 @@ class CachingDataset(Dataset):
         # Empty data bundle
         self.data_bundle = None
 
+        # Synthetic data bundle
+        self.synthetic_bundle = None
+
         # Dataset filters
-        self.filters = [ "ray_origins", "ray_directions", "ray_targets", "ray_bounds", "target_depth", "size", "hwf" ]
+        self.filters = ["ray_origins", "ray_directions", "ray_targets", "ray_bounds", "target_depth", "size", "hwf"]
 
         # Default experiment ray bounds
-        self.ray_bounds = torch.tensor([ self.cfg.dataset.near, self.cfg.dataset.far ]).float()
+        self.ray_bounds = torch.tensor([self.cfg.dataset.near, self.cfg.dataset.far]).float()
         self.num_random_rays = self.cfg.nerf.train.num_random_rays
 
         # Cached dataset path
@@ -145,7 +168,7 @@ class CachingDataset(Dataset):
                 print(f"The path ${self.path} does not exist, creating one...")
 
                 # Create dataset directory
-                os.makedirs(self.path, exist_ok = True)
+                os.makedirs(self.path, exist_ok=True)
 
             if self.cfg.dataset.caching.override_caching or not cache_dir_exists:
                 if cache_dir_exists:
@@ -172,9 +195,8 @@ class CachingDataset(Dataset):
             self.data_bundle = self.load_dataset()
 
             self.init_sampling(self.data_bundle.hwf)
-            H, W, focal = self.data_bundle.hwf
             self.data_bundle.ray_origins, self.data_bundle.ray_directions = convert_poses_to_rays(
-                self.data_bundle.poses, H, W, focal
+                self.data_bundle.poses, *self.data_bundle.hwf
             )
 
             size = self.data_bundle.size
@@ -193,6 +215,9 @@ class CachingDataset(Dataset):
             print(f"Load whole dataset into the memory {time_last}s seconds...")
 
     def __len__(self):
+        if self.synthetic_bundle is not None:
+            return self.synthetic_bundle.size
+
         return len(self.paths) if self.cfg.dataset.caching.use_caching else self.data_bundle.size
 
     def __getitem__(self, idx):
@@ -200,12 +225,15 @@ class CachingDataset(Dataset):
         if self.cfg.dataset.caching.use_caching:
             bundle = DataBundle.deserialize(torch.load(self.paths[idx]))
         else:
-            bundle = self.data_bundle[idx]
+            if self.synthetic_bundle is not None:
+                bundle = self.synthetic_bundle[idx]
+            else:
+                bundle = self.data_bundle[idx]
 
         # Random sampling if training
-        if self.type != DatasetType.VALIDATION:
+        if self.type == DatasetType.TRAIN:
             fn = lambda x: batch_random_sampling(self.cfg, self.coords, x)
-            bundle = bundle.apply(fn, [ "ray_directions", "ray_targets", "target_depth", "target_normals" ])
+            bundle = bundle.apply(fn, ["ray_directions", "ray_targets", "target_depth", "target_normals"])
 
         return bundle.serialize(self.filters)
 
@@ -216,10 +244,10 @@ class CachingDataset(Dataset):
         # Coordinates to sample from, list of H * W indices in form of (width, height), H * W * 2
         self.coords = torch.stack(
             meshgrid_xy(torch.arange(H), torch.arange(W)),
-            dim = -1,
+            dim=-1,
         ).reshape((-1, 2))
 
-    def save_dataset(self, bundle: DataBundle, img_idx, batch_idx = -1):
+    def save_dataset(self, bundle: DataBundle, img_idx, batch_idx=-1):
         """
             Script to run and cache a dataset for faster train-eval loops.
         """
@@ -247,13 +275,13 @@ class CachingDataset(Dataset):
         pass
 
 
-class BlenderDataset(SynthesizableDataset, CachingDataset):
+class BlenderDataset(CachingDataset):
     """
         A basic PyTorch dataset for NeRF based on blender data. A single sample is equal
         to a full picture, so some additional pre-processing might be needed.
     """
 
-    def __init__(self, cfg, type = DatasetType.TRAIN):
+    def __init__(self, cfg, type=DatasetType.TRAIN):
         super(BlenderDataset, self).__init__(cfg, type)
         print("Loading Blender Data...")
 
@@ -293,7 +321,7 @@ class BlenderDataset(SynthesizableDataset, CachingDataset):
 
 
 class ColmapDataset(CachingDataset):
-    def __init__(self, cfg, spherify = True, type = DatasetType.TRAIN):
+    def __init__(self, cfg, spherify=True, type=DatasetType.TRAIN):
         self.downscale_factor = cfg.dataset.llff_downsample_factor
         self.spherify = spherify
 
@@ -302,16 +330,16 @@ class ColmapDataset(CachingDataset):
 
     def load_dataset(self):
         images, poses, bounds, render_poses, i_test = load_llff_data(
-            self.dataset_path, factor = self.downscale_factor, spherify = self.spherify
+            self.dataset_path, factor=self.downscale_factor, spherify=self.spherify
         )
 
         samples_hold_count = self.cfg.dataset.llff_hold_step
         if samples_hold_count > 0:
             val_indices = np.arange(images.shape[0])[::samples_hold_count]
         else:
-            val_indices = np.array([ i_test ])
+            val_indices = np.array([i_test])
 
-        train_indices = np.array([ i for i in np.arange(images.shape[0]) if i not in val_indices ])
+        train_indices = np.array([i for i in np.arange(images.shape[0]) if i not in val_indices])
         target_indices = train_indices if self.type == DatasetType.TRAIN else val_indices
 
         poses = torch.from_numpy(poses[target_indices, ...])
@@ -350,15 +378,15 @@ class ScanNetDataset(Dataset):
     def __init__(
             self,
             data,
-            num_random_rays = None,
-            near = 2,
-            far = 6,
-            start = 0,
-            stop = -1,
-            skip = None,
-            skip_every = None,
-            resolution = 1.0,
-            scale = 1.0
+            num_random_rays=None,
+            near=2,
+            far=6,
+            start=0,
+            stop=-1,
+            skip=None,
+            skip_every=None,
+            resolution=1.0,
+            scale=1.0
     ):
         """
         :param data: A loaded .sens file
@@ -393,16 +421,16 @@ class ScanNetDataset(Dataset):
         )
         if self.num_random_rays:
             self.pixels = torch.stack(
-                meshgrid_xy(torch.arange(self.H), torch.arange(self.W)), dim = -1,
+                meshgrid_xy(torch.arange(self.H), torch.arange(self.W)), dim=-1,
             ).reshape((-1, 2))
             self.ray_bounds = (
-                torch.tensor([near, far], dtype = torch.float32)
+                torch.tensor([near, far], dtype=torch.float32)
                     .view(1, 2)
                     .expand(self.num_random_rays, 2)
             )
         else:
             self.ray_bounds = (
-                torch.tensor([near, far], dtype = torch.float32)
+                torch.tensor([near, far], dtype=torch.float32)
                     .view(1, 2)
                     .expand(self.dummy_rays.shape[0] * self.dummy_rays.shape[1], 2)
             )
@@ -420,21 +448,21 @@ class ScanNetDataset(Dataset):
         # Format image
         image = data_frame.decompress_color(self.data.color_compression_type)
         if self.resolution != 1.0:
-            image = cv2.resize(image, dsize = (self.H, self.W), interpolation = cv2.INTER_AREA)
+            image = cv2.resize(image, dsize=(self.H, self.W), interpolation=cv2.INTER_AREA)
             image = np.transpose(image, (1, 0, 2))
         image = torch.from_numpy(image / 255.0).float()
-        image = torch.cat((image, torch.ones(self.H, self.W, 1, dtype = image.dtype)), dim = -1)
+        image = torch.cat((image, torch.ones(self.H, self.W, 1, dtype=image.dtype)), dim=-1)
 
         # Resolve ray directions and positions
         pose = torch.from_numpy(data_frame.camera_to_world)
-        ray_directions = torch.sum(self.dummy_rays[..., None, :] * pose[:3, :3], dim = -1).float()
+        ray_directions = torch.sum(self.dummy_rays[..., None, :] * pose[:3, :3], dim=-1).float()
         ray_positions = (pose[:3, -1] * self.scale).expand(ray_directions.shape).float()
 
         if self.num_random_rays:
 
             # Choose subset to sample
             pixel_idx = np.random.choice(
-                self.pixels.shape[0], size = (self.num_random_rays), replace = False
+                self.pixels.shape[0], size=(self.num_random_rays), replace=False
             )
             ray_idx = self.pixels[pixel_idx]
             return (
@@ -461,17 +489,17 @@ class GeneralColmapDataset(Dataset):
             num_random_rays,
             near,
             far,
-            shuffle = False,
-            start = None,
-            stop = None,
-            downscale_factor = 1.0
+            shuffle=False,
+            start=None,
+            stop=None,
+            downscale_factor=1.0
     ):
         super(GeneralColmapDataset, self).__init__()
         resolution = 1 / downscale_factor
         self.num_random_rays = num_random_rays
         if config_folder_path is not Path:
             config_folder_path = Path(config_folder_path)
-        cameras, images, points3D = read_model(path = config_folder_path / "sparse" / "0", ext = ".bin")
+        cameras, images, points3D = read_model(path=config_folder_path / "sparse" / "0", ext=".bin")
 
         list_of_keys = list(cameras.keys())
         cam = cameras[list_of_keys[0]]
@@ -504,7 +532,7 @@ class GeneralColmapDataset(Dataset):
             self.focal = self.focal * resolution
             imgs = [
                 torch.from_numpy(
-                    cv2.resize(img, dsize = (self.W, self.H), interpolation = cv2.INTER_AREA)
+                    cv2.resize(img, dsize=(self.W, self.H), interpolation=cv2.INTER_AREA)
                 )
                 for img in imgs
             ]
@@ -513,7 +541,7 @@ class GeneralColmapDataset(Dataset):
             imgs = torch.from_numpy(imgs)
 
         if imgs.shape[-1] == 3:
-            imgs = torch.cat((imgs, torch.ones(*imgs.shape[:-1], 1)), dim = -1)
+            imgs = torch.cat((imgs, torch.ones(*imgs.shape[:-1], 1)), dim=-1)
 
         all_ray_directions, all_ray_origins = get_rays(
             self.H, self.W, cam.params, poses, cam.model, resolution
@@ -525,7 +553,7 @@ class GeneralColmapDataset(Dataset):
             self.all_ray_origins = all_ray_origins.view(-1, 3).float()
             self.all_ray_directions = all_ray_directions.view(-1, 3).float()
             self.ray_bounds = (
-                torch.tensor([near, far], dtype = self.ray_targets.dtype)
+                torch.tensor([near, far], dtype=self.ray_targets.dtype)
                     .view(1, 2)
                     .expand(self.num_random_rays, 2).float()
             )
@@ -535,7 +563,7 @@ class GeneralColmapDataset(Dataset):
             self.all_ray_origins = all_ray_origins.view(total_images, -1, 3).float()
             self.all_ray_directions = all_ray_directions.view(total_images, -1, 3).float()
             self.ray_bounds = (
-                torch.tensor([near, far], dtype = self.ray_targets.dtype)
+                torch.tensor([near, far], dtype=self.ray_targets.dtype)
                     .view(1, 2)
                     .expand(self.ray_targets.shape[1], 2)
             ).float()

@@ -7,8 +7,7 @@ import models
 from importlib import import_module
 from pytorch3d.structures import Meshes
 from skimage import measure
-from tqdm import tqdm
-from nerf.nerf_helpers import export_obj
+from nerf.nerf_helpers import export_obj, batchify
 from lightning_modules import PathParser
 
 
@@ -23,30 +22,6 @@ def create_mesh(vertices, faces_idx):
     target_mesh = Meshes(verts=[vertices], faces=[faces_idx])
 
     return target_mesh
-
-
-def batchify(*data, batch_size=1024, device="cpu"):
-    assert all(sample.shape[0] == data[0].shape[0] for sample in data), \
-        "Sizes of tensors must match for dimension 0."
-
-    # Custom batchifier
-    def batchifier():
-        # Data size and current batch offset
-        size, batch_offset = data[0].shape[0], 0
-
-        while batch_offset < size:
-            # Subsample slice
-            batch_slice = slice(batch_offset, batch_offset + batch_size)
-
-            # Yield each subsample, and move to available device
-            yield [sample[batch_slice].to(device) for sample in data]
-
-            batch_offset += batch_size
-
-    # Total batches
-    total = (data[0].shape[0] - 1) // batch_size + 1
-
-    return tqdm(batchifier(), total=total)
 
 
 def extract_radiance(model, args, device, nums):
@@ -214,10 +189,10 @@ def export_marching_cubes(model, args, cfg, device):
         batch_generator = batchify(ray_origins, directions, ray_bounds, batch_size=args.batch_size, device=device)
         for (ray_origins, ray_directions, ray_bounds) in batch_generator:
             # View dependent diffuse batch queried
-            diffuse_batch = model.query_diffuse((ray_origins, ray_directions, ray_bounds.transpose(0, 1)))
+            output_bundle = model.query((ray_origins, ray_directions, ray_bounds.transpose(0, 1)))
 
             # Accumulate diffuse
-            diffuse.append(diffuse_batch.cpu())
+            diffuse.append(output_bundle.rgb_map.cpu())
 
     # Query the whole diffuse map
     diffuse = torch.cat(diffuse, dim=0).numpy()

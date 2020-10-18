@@ -59,31 +59,33 @@ class NeRFModel(BaseModel):
         # Expand rays to match batch size
         expanded_ray_directions = ray_directions[..., None, :].expand_as(ray_points)
 
+        # Coarse inference
         coarse_radiance_field = self.model_coarse(ray_points, expanded_ray_directions)
-        rgb_coarse, _, weights, _, = self.volume_renderer(coarse_radiance_field, ray_intervals, ray_directions)
+        coarse_bundle = self.volume_renderer(coarse_radiance_field, ray_intervals, ray_directions)
 
-        rgb_fine, disp_fine, acc_fine, depth_fine = None, None, None, None
+        fine_bundle = None
         if self.model_fine is not None:
-            fine_ray_intervals = self.sample_pdf(ray_intervals, weights, nerf_cfg.perturb)
+            fine_ray_intervals = self.sample_pdf(ray_intervals, coarse_bundle.weights, nerf_cfg.perturb)
             ray_points = intervals_to_ray_points(
                 fine_ray_intervals, ray_directions, ray_origins
             )
 
             # Expand rays to match batch_size
             expanded_ray_directions = ray_directions[..., None, :].expand_as(ray_points)
+
+            # Fine inference
             fine_radiance_field = self.model_fine(ray_points, expanded_ray_directions)
+            fine_bundle = self.volume_renderer(fine_radiance_field, fine_ray_intervals, ray_directions)
 
-            rgb_fine, depth_fine, _, _, = self.volume_renderer(
-                fine_radiance_field, fine_ray_intervals, ray_directions
-            )
+        return coarse_bundle, fine_bundle
 
-        return rgb_coarse, rgb_fine
+    def query(self, ray_batch):
+        # Fine query
+        coarse_bundle, fine_bundle = self.forward(ray_batch)
+        if fine_bundle is not None:
+            return fine_bundle
 
-    def query_diffuse(self, ray_batch):
-        # View dependent diffuse batch queried
-        _, diffuse_batch = self.forward(ray_batch)
-
-        return diffuse_batch
+        return coarse_bundle
 
     def training_step(self, ray_batch, batch_idx):
         # Unpacking bundle
@@ -95,21 +97,24 @@ class NeRFModel(BaseModel):
 
         coarse_loss, fine_loss = 0, 0
         for i in range(0, bundle.ray_targets.shape[0], batch_size):
-            # re-usable slice
+            # Re-usable slice, maybe generator to use instead
             tn_slice = slice(i, i + batch_size)
+            rgb_target = bundle.ray_targets[tn_slice].to(self.device)
+
+            # Ray batch
+            ray_batch = (bundle.ray_origins.to(self.device), bundle.ray_directions[tn_slice].to(self.device), bundle.ray_bounds.to(self.device))
 
             # Forward pass
-            rgb_coarse, rgb_fine = self.forward((bundle.ray_origins.to(self.device), bundle.ray_directions[tn_slice].to(self.device), bundle.ray_bounds.to(self.device)))
-            rgb_target = bundle.ray_targets[tn_slice].to(self.device)
-            coarse_loss += self.loss(rgb_coarse, rgb_target)
+            coarse_bundle, fine_bundle = self.forward(ray_batch)
+            coarse_loss += self.loss(coarse_bundle.rgb_map, rgb_target)
 
             # Early stopping if the scene data is too sparse
-            self.check_early_stopping(rgb_coarse)
+            self.check_early_stopping(coarse_bundle.rgb_coarse)
             if self.model_fine is not None:
-                fine_loss += self.loss(rgb_fine, rgb_target)
+                fine_loss += self.loss(fine_bundle.rgb_map, rgb_target)
 
                 # Early stopping if the scene data is too sparse
-                self.check_early_stopping(rgb_fine)
+                self.check_early_stopping(fine_bundle.rgb_map)
 
         #  Compute loss
         coarse_loss /= batch_count
@@ -155,16 +160,16 @@ class NeRFModel(BaseModel):
         for i in range(0, bundle.ray_targets.shape[0], batch_size):
             # re-usable slice
             tn_slice = slice(i, i + batch_size)
-
-            rgb_coarse, rgb_fine = self.forward((bundle.ray_origins, bundle.ray_directions[tn_slice], bundle.ray_bounds))
             rgb_target = bundle.ray_targets[tn_slice]
-            coarse_loss += self.loss(rgb_coarse, rgb_target)
 
-            all_rgb_coarse.append(rgb_coarse)
+            coarse_bundle, fine_bundle = self.forward((bundle.ray_origins, bundle.ray_directions[tn_slice], bundle.ray_bounds))
+            coarse_loss += self.loss(coarse_bundle.rgb_map, rgb_target)
+
+            all_rgb_coarse.append(coarse_bundle.rgb_map)
             if self.model_fine is not None:
-                fine_loss += self.loss(rgb_fine, rgb_target)
+                fine_loss += self.loss(fine_bundle.rgb_map, rgb_target)
 
-                all_rgb_fine.append(rgb_fine)
+                all_rgb_fine.append(fine_bundle.rgb_map)
 
         coarse_loss /= batch_count
         loss = coarse_loss

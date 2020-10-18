@@ -20,7 +20,8 @@ NeRF (Neural radiance field) optimizes directly the parameters of continuous 5D 
 
 <p align="center"> 
     <img src="misc/lego-mesh.gif">
-    Extracted mesh with appearance.
+    <br>
+    <em>Extracted Lego mesh with appearance.</em>
 </p>
 
 The project is an extension and improvement upon the original method NeRF for neural rendering view-synthesis designed for rapid prototyping and experimentation. Main improvements are: 

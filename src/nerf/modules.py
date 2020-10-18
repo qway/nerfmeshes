@@ -2,6 +2,7 @@ import math
 import torch
 
 from nerf import cumprod_exclusive
+from dataclasses import astuple, dataclass, fields
 
 
 class PositionalEncoding(torch.nn.Module):
@@ -34,6 +35,16 @@ class PositionalEncoding(torch.nn.Module):
 
     def output_size(self):
         return 2 * 3 * self.num_encoding_functions + (3 if self.include_input else 0)
+
+
+@dataclass
+class OutputBundle:
+    rgb_map: torch.Tensor = None
+    depth_map: torch.Tensor = None
+    weights: torch.Tensor = None
+    mask_weights: torch.Tensor = None
+    acc_map: torch.Tensor = None
+    disp_map: torch.Tensor = None
 
 
 class VolumeRenderer(torch.nn.Module):
@@ -92,14 +103,22 @@ class VolumeRenderer(torch.nn.Module):
         acc_map = weights.sum(dim = -1)
 
         depth_map = (weights * depth_values).sum(dim = -1)
-        # disp_map = 1.0 / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / acc_map)
+        disp_map = 1.0 / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / acc_map)
+        disp_map[torch.isnan(disp_map)] = 0
         if not self.training:
             depth_map[acc_map < 1.0] = 0
 
         if self.white_background:
             rgb_map = rgb_map + (1.0 - acc_map[..., None])
 
-        return rgb_map, depth_map, weights, mask_weights
+        return OutputBundle(
+            rgb_map = rgb_map,
+            depth_map = depth_map,
+            weights = weights,
+            mask_weights = mask_weights,
+            acc_map = acc_map,
+            disp_map = disp_map
+        )
 
 
 class DensityExtractor(torch.nn.Module):

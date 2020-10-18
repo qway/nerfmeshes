@@ -7,11 +7,9 @@ from pytorch3d.loss import chamfer_distance
 from torch.utils.tensorboard import SummaryWriter
 from mesh_nerf import extract_geometry, create_mesh
 from torch.optim.lr_scheduler import LambdaLR
-
 from abc import abstractmethod
 from torch.utils.data import DataLoader
-from data.datasets import BlenderDataset, ScanNetDataset, LLFFDataset, DatasetType, SynthesizableDataset
-from data.loaders.load_scannet import SensorData
+from data.datasets import BlenderDataset, ColmapDataset, DatasetType, SynthesizableDataset
 from nerf import CfgNode, mse2psnr, VolumeRenderer
 from models.model_helpers import nest_dict, flatten_dict
 
@@ -60,7 +58,7 @@ class BaseModel(pl.LightningModule):
         self.trainer.check_val_every_n_epoch = self.cfg.experiment.validate_every // len(self.train_dataset)
 
     @abstractmethod
-    def query_diffuse(self, ray_batch):
+    def query(self, ray_batch):
         pass
 
     def sample_points(self, points, rays=None, **kwargs):
@@ -111,7 +109,7 @@ class BaseModel(pl.LightningModule):
         elif self.cfg.dataset.type == "scannet":
             raise NotImplementedError
         elif self.cfg.dataset.type == "colmap":
-            dataset = LLFFDataset(self.cfg, type=dataset_type)
+            dataset = ColmapDataset(self.cfg, type=dataset_type)
 
         return dataset
 

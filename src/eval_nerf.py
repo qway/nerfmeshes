@@ -1,212 +1,152 @@
-import argparse
 import os
 import imageio
-import numpy as np
+import argparse
 import torch
-import torchvision
-import yaml
-import time
 import models
+import torch.nn.functional as F
 
+from lightning_modules import PathParser
 from nerf import (
     mse2psnr,
     export_point_cloud,
+    cast_to_pil_image,
+    cast_to_disparity_image,
+    batchify
 )
-
 from pathlib import Path
 from torch.utils.data import DataLoader
 from tqdm import tqdm, trange
-
 from data.datasets import BlenderDataset, DatasetType
-from nerf import CfgNode, RaySampleInterval, SamplePDF
-from models import nest_dict, get_ray_batch
+from data.data_helpers import DataBundle
 
 
-def cast_to_image(tensor):
-    # Input tensor is (H, W, 3). Convert to (3, H, W).
-    tensor = tensor.permute(2, 0, 1)
+def eval_nerf(model, config_args, cfg, device):
 
-    # Convert to PIL Image and then np.array (output shape: (H, W, 3))
-    img = np.array(torchvision.transforms.ToPILImage()(tensor.detach().cpu()))
+    # Create dataset loader
+    dataset = BlenderDataset(cfg, type = DatasetType.TEST)
+    if config_args.synthesis_images:
+        dataset.synthesis()
 
-    return img
-
-
-def cast_to_disparity_image(tensor):
-    img = (tensor - tensor.min()) / (tensor.max() - tensor.min())
-    img = img.clamp(0, 1) * 255
-
-    return img.detach().cpu().numpy().astype(np.uint8)
-
-
-def main():
-    torch.set_printoptions(threshold = 100, edgeitems = 50, precision = 8, sci_mode = False)
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "folder", type=str, help="Path to Log Folder"
-    )
-    parser.add_argument(
-        "--save", action="store_true", help="Should images be saved?"
-    )
-    parser.set_defaults(save = False)
-    parser.add_argument(
-        "--save-dir", type=str, help="Save images to this directory, if specified."
-    )
-    parser.add_argument(
-        "--save-disparity", action="store_true"
-    )
-    parser.add_argument(
-        "--high-freq-sampling", action="store_true"
-    )
-    parser.add_argument('--synthesis-images', dest = 'synthesis_images', action = 'store_true')
-    parser.set_defaults(synthesis_images = False)
-
-    config_args = parser.parse_args()
-
-    # Read config file.
-    log_folder = Path(config_args.folder)
-    with (log_folder / "hparams.yaml").open() as f:
-        hparams = yaml.load(f, Loader = yaml.FullLoader)
-        cfg = CfgNode(nest_dict(hparams, sep = "."))
-
-    if torch.cuda.is_available():
-        device = torch.cuda.current_device()
-    else:
-        device = "cpu"
-
-    try:
-        checkpoint_path = next(log_folder.glob('*.ckpt'))
-    except:
-        raise FileNotFoundError("Could not find a .ckpt file in folder ", config_args.checkpoint)
-
-    model = getattr(models, cfg.experiment.model).load_from_checkpoint(checkpoint_path, cfg = cfg)
-    if config_args.high_freq_sampling:
-        model.sample_interval = RaySampleInterval(cfg, cfg.nerf.train.num_coarse)
-        model.sample_pdf = SamplePDF(cfg.nerf.train.num_fine * 2)
-
-    model.eval()
-    model.to(device)
-
-    # if config_args.synthesis_images:
-    #     eval_poses = render_poses.float()
-    # else:
-    #     eval_poses = poses.float()
-
-    test_dataset = BlenderDataset(cfg, type = DatasetType.TEST)
-    test_dataloader = DataLoader(test_dataset, batch_size = 1)
+    data_loader = DataLoader(dataset, batch_size = 1)
 
     # Create directory to save images to.
-    if config_args.save and config_args.save_dir:
-        save_dir = log_folder.name + "-eval-images"
-        os.makedirs(save_dir, exist_ok=True)
-        if config_args.save_disparity:
-            os.makedirs(os.path.join(save_dir, "disparity"), exist_ok=True)
+    root_dir = Path(config_args.save_dir) / cfg.experiment.id
+    if config_args.save_images:
+        # Output
+        images_dir = root_dir / "images"
+        os.makedirs(images_dir, exist_ok=True)
+
+        # Targets
+        targets_dir = root_dir / "targets"
+        os.makedirs(targets_dir, exist_ok=True)
+
+    # Create directory to save disparity assets to.
+    if config_args.save_disparity:
+        disparity_dir = root_dir / "disparity"
+        os.makedirs(disparity_dir, exist_ok=True)
 
     # Evaluation loop
-    dataset_coarse_loss = []
-    dataset_fine_loss = []
-    times_per_image = []
-    for img_nr, image_ray_batch in enumerate(tqdm(test_dataloader)):
-        start = time.time()
-        # rgb = None, None
-        # disp = None, None
+    losses = []
+    for img_nr, ray_batch in enumerate(tqdm(data_loader)):
 
-        ray_origins, ray_directions, bounds, ray_targets, dep_target = get_ray_batch(
-            image_ray_batch
-        )
-        # Manual batching, since images can be bigger than memory allows
-        batchsize = cfg.nerf.validation.chunksize//2
-        batchcount = ray_origins.shape[0] / batchsize
+        # Unpacking bundle
+        bundle = DataBundle.deserialize(ray_batch).to_ray_batch()
 
-        coarse_loss = 0
-        fine_loss = 0
-        all_rgb_coarse = []
-        all_disp_coarse = []
-        all_rgb_fine = []
-        all_disp_fine = []
-        for i in trange(0, ray_origins.shape[0], batchsize, position = 0):
-            rgb_coarse, disp_coarse, _, depth_coarse, rgb_fine, disp_fine, _, depth_fine = model.forward(
-                (
-                    ray_origins[i: i + batchsize].to(device),
-                    ray_directions[i: i + batchsize].to(device),
-                    bounds[i: i + batchsize].to(device),
-                )
-            )
-            all_rgb_coarse.append(rgb_coarse)
-            all_disp_coarse.append(disp_coarse)
+        # Manual batching, since images are expensive to be kept on GPU
+        batch_size = cfg.nerf.validation.chunksize
+        batch_count = bundle.ray_directions.shape[0] / batch_size
 
-            batch_targets = ray_targets[i: i + batchsize, :3].to(device)
-            coarse_loss += torch.nn.functional.mse_loss(
-                rgb_coarse[..., :3], batch_targets
-            )
+        # Current metrics
+        loss = 0
+        rgb_map, disp_map = [], []
+        batch_generator = batchify(bundle.ray_directions, bundle.ray_targets, batch_size = batch_size, device = device, progress=False)
+        for (ray_directions, ray_targets) in batch_generator:
+            # Query fine rgb and depth
+            output_bundle = model.query((bundle.ray_origins.to(device), ray_directions, bundle.ray_bounds))
 
-            if rgb_fine is not None:
-                fine_loss += torch.nn.functional.mse_loss(
-                    rgb_fine[..., :3], batch_targets
-                )
-                all_rgb_fine.append(rgb_fine)
-                all_disp_fine.append(disp_fine)
+            # Accumulate queried rgb and depth
+            rgb_map.append(output_bundle.rgb_map)
+            disp_map.append(output_bundle.disp_map)
 
-        coarse_loss /= batchcount
-        if rgb_fine is not None:
-            rgb = torch.cat(all_rgb_fine, 0)
-            disp = torch.cat(all_disp_fine, 0)
-            fine_loss /= batchcount
-        else:
-            rgb = torch.cat(all_rgb_coarse, 0)
-            disp = torch.cat(all_disp_coarse, 0)
+            if not config_args.synthesis_images:
+                # Compute mean squared error
+                loss += F.mse_loss(output_bundle.rgb_map, ray_targets)
 
-        dataset_coarse_loss.append(coarse_loss.item())
-        if rgb_fine is not None:
-            dataset_fine_loss.append(fine_loss.item())
+        if not config_args.synthesis_images:
+            loss /= batch_count
+            losses.append(loss)
 
-        if config_args.save:
-            savefile = os.path.join(save_dir, f"{img_nr:04d}.png")
-            imageio.imwrite(
-                savefile, cast_to_image(rgb[..., :3].view(test_dataset.H, test_dataset.W, 3), cfg.dataset.type.lower())
-            )
+        # RGB and depth map output
+        rgb_map, disp_map = torch.cat(rgb_map, 0), torch.cat(disp_map, 0)
 
-            savefile = os.path.join(config_args.save_dir, f"{i:04d} target.png")
-            imageio.imwrite(
-                savefile, cast_to_image(ray_targets[..., :3], cfg.dataset.type.lower())
-            )
+        # Save images to newly created folder.
+        if config_args.save_images:
+            # Save image outputs
+            file_name = os.path.join(images_dir, f"{img_nr:04d}.png")
+            imageio.imwrite(file_name, cast_to_pil_image(rgb_map.view(bundle.hwf[0], bundle.hwf[1], 3)))
 
-            if config_args.save_disparity:
-                savefile = os.path.join(config_args.save_dir, "disparity", f"{i:04d}.png")
-                # disp.view(test_dataset.H, test_dataset.W, 1
-                imageio.imwrite(savefile, cast_to_disparity_image(disp))
+            if not config_args.synthesis_images:
+                # Save image targets
+                file_name = os.path.join(targets_dir, f"{img_nr:04d}.png")
+                imageio.imwrite(file_name, cast_to_pil_image(bundle.ray_targets.view(bundle.hwf[0], bundle.hwf[1], 3)))
 
+        # Save disparity assets to.
+        if config_args.save_disparity:
+            file_name = os.path.join(disparity_dir, f"{img_nr:04d}.png")
+            imageio.imwrite(file_name, cast_to_disparity_image(
+                disp_map.view(bundle.hwf[0], bundle.hwf[1]), white_background = True
+            ))
 
-        depth_target = depth_coarse if depth_fine is None else depth_fine
-        export_point_cloud(i, ray_origins, ray_directions, depth_target, dep_target)
+        if not config_args.synthesis_images:
+            print(f"[EVAL] Iter: {img_nr} Loss MSE {loss} / PSNR: {mse2psnr(loss)}")
 
-        times_per_image.append(time.time() - start)
-        if config_args.save_dir:
-            save_file = os.path.join(config_args.save_dir, f"{i:04d} depth_target.png")
-            imageio.imwrite(save_file, cast_to_disparity_image(dep_target))
-
-            save_file = os.path.join(config_args.save_dir, f"{i:04d} depth_output.png")
-            imageio.imwrite(save_file, cast_to_disparity_image(depth_target))
-
-
-        coarse_depth_loss = torch.nn.functional.mse_loss(depth_coarse, dep_target)
-        fine_depth_loss = torch.tensor(0.)
-        if depth_fine is not None:
-            fine_depth_loss = torch.nn.functional.mse_loss(depth_fine, dep_target)
-
-        print(f"Loss MSE image {i}: Coarse Loss: {coarse_loss} / Fine Loss: {fine_loss}")
-        print(f"Loss PSNR image {i}: Coarse PSNR: {mse2psnr(coarse_loss.item())} / Fine PSNR: {mse2psnr(fine_loss.item())}")
-        print(f"Loss Depth image {i}: Coarse Depth: {coarse_depth_loss} / Fine Depth: {fine_depth_loss}")
-
-        tqdm.write(f"Avg time per image: {sum(times_per_image) / (img_nr + 1)}")
-
-    mse_coarse = np.mean(dataset_coarse_loss)
-    print("Coarse MSE:", mse_coarse, "\tCoarse PSNR:", mse2psnr(mse_coarse))
-    if rgb_fine is not None:
-        mse_fine = np.mean(dataset_fine_loss)
-        print("Fine MSE:", mse_fine, "\tFine PSNR:", mse2psnr(mse_fine))
+    if not config_args.synthesis_images:
+        total_loss = torch.stack(losses).mean()
+        print(f"Dataset loss MSE: {total_loss} / PSNR: {mse2psnr(total_loss)}")
 
 
 if __name__ == "__main__":
+    torch.set_printoptions(threshold = 100, edgeitems = 50, precision = 8, sci_mode = False)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--log-checkpoint", type=str, default=None,
+        help="Training log path with the config and checkpoints to load existent configuration.",
+    )
+    parser.add_argument(
+        "--checkpoint", type=str, default="model_last.ckpt",
+        help="Load existent configuration from the latest checkpoint by default.",
+    )
+    parser.add_argument(
+        "--save-dir", type=str, default=".",
+        help="Save assets to this directory, if specified.",
+    )
+    parser.add_argument(
+        "--save-images", action="store_true", default=False,
+        help="Save view images.",
+    )
+    parser.add_argument(
+        "--save-disparity", action="store_true", default=False,
+        help="Save disparity images.",
+    )
+    parser.add_argument(
+        "--synthesis-images", action="store_true", default=False,
+        help="Synthesis new views 360° around the neural scene.",
+    )
+    config_args = parser.parse_args()
+
+    # Existent log path
+    path_parser = PathParser()
+    cfg, _ = path_parser.parse(None, config_args.log_checkpoint, None, config_args.checkpoint)
+
+    # Available device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Load model checkpoint
+    print(f"Loading model from {path_parser.checkpoint_path}")
+    model = getattr(models, cfg.experiment.model).load_from_checkpoint(path_parser.checkpoint_path)
+    model = model.eval().to(device)
+
     with torch.no_grad():
-        main()
+        # Evaluate model
+        eval_nerf(model, config_args, cfg, device)
