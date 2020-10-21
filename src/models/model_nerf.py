@@ -99,17 +99,23 @@ class NeRFModel(BaseModel):
         for i in range(0, bundle.ray_targets.shape[0], batch_size):
             # Re-usable slice, maybe generator to use instead
             tn_slice = slice(i, i + batch_size)
+
+            if self.cfg.dataset.use_ndc:
+                ray_origins = bundle.ray_origins[tn_slice].to(self.device)
+            else:
+                ray_origins = bundle.ray_origins.to(self.device)
+
             rgb_target = bundle.ray_targets[tn_slice].to(self.device)
 
             # Ray batch
-            ray_batch = (bundle.ray_origins.to(self.device), bundle.ray_directions[tn_slice].to(self.device), bundle.ray_bounds.to(self.device))
+            ray_batch = (ray_origins, bundle.ray_directions[tn_slice].to(self.device), bundle.ray_bounds.to(self.device))
 
             # Forward pass
             coarse_bundle, fine_bundle = self.forward(ray_batch)
             coarse_loss += self.loss(coarse_bundle.rgb_map, rgb_target)
 
             # Early stopping if the scene data is too sparse
-            self.check_early_stopping(coarse_bundle.rgb_coarse)
+            self.check_early_stopping(coarse_bundle.rgb_map)
             if self.model_fine is not None:
                 fine_loss += self.loss(fine_bundle.rgb_map, rgb_target)
 
@@ -161,8 +167,12 @@ class NeRFModel(BaseModel):
             # re-usable slice
             tn_slice = slice(i, i + batch_size)
             rgb_target = bundle.ray_targets[tn_slice]
+            if self.cfg.dataset.use_ndc:
+                ray_origins = bundle.ray_origins[tn_slice]
+            else:
+                ray_origins = bundle.ray_origins
 
-            coarse_bundle, fine_bundle = self.forward((bundle.ray_origins, bundle.ray_directions[tn_slice], bundle.ray_bounds))
+            coarse_bundle, fine_bundle = self.forward((ray_origins, bundle.ray_directions[tn_slice], bundle.ray_bounds))
             coarse_loss += self.loss(coarse_bundle.rgb_map, rgb_target)
 
             all_rgb_coarse.append(coarse_bundle.rgb_map)

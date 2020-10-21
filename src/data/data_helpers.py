@@ -1,5 +1,6 @@
 from dataclasses import astuple, dataclass, fields
 from typing import Dict
+from nerf.nerf_helpers import ndc_rays
 
 import torch
 import numpy as np
@@ -159,3 +160,8 @@ class DataBundle:
             field.name: getattr(self, field.name) for field in fields(self)
             if getattr(self, field.name) is not None and field.name in filters
         }
+
+    def ndc(self):
+        self.ray_origins, self.ray_directions = ndc_rays(*self.hwf, 1.0, self.ray_origins[None, None, :], self.ray_directions)
+
+        return self

@@ -7,14 +7,11 @@ import glob
 import torch
 import time
 
-from mesh_nerf import create_mesh
-from pytorch3d.io import load_obj
 from abc import abstractmethod
 from tqdm import trange
 from enum import Enum
 from pathlib import Path
 from torch.utils.data import Dataset
-
 from data.loaders.load_blender import load_blender_data
 from data.loaders.load_colmap import read_model
 from data.loaders.load_llff import load_llff_data
@@ -199,6 +196,10 @@ class CachingDataset(SynthesizableDataset, Dataset):
                 self.data_bundle.poses, *self.data_bundle.hwf
             )
 
+            if self.cfg.dataset.use_ndc:
+                # Use normalized device coordinates
+                self.data_bundle.ndc()
+
             size = self.data_bundle.size
 
             # if self.shuffle:
@@ -233,7 +234,11 @@ class CachingDataset(SynthesizableDataset, Dataset):
         # Random sampling if training
         if self.type == DatasetType.TRAIN:
             fn = lambda x: batch_random_sampling(self.cfg, self.coords, x)
-            bundle = bundle.apply(fn, ["ray_directions", "ray_targets", "target_depth", "target_normals"])
+            if self.cfg.dataset.use_ndc:
+                # Use normalized device coordinates
+                bundle = bundle.apply(fn, ["ray_origins", "ray_directions", "ray_targets", "target_depth", "target_normals"])
+            else:
+                bundle = bundle.apply(fn, ["ray_directions", "ray_targets", "target_depth", "target_normals"])
 
         return bundle.serialize(self.filters)
 
@@ -252,7 +257,8 @@ class CachingDataset(SynthesizableDataset, Dataset):
             Script to run and cache a dataset for faster train-eval loops.
         """
         if batch_idx != -1:
-            path = str(img_idx).zfill(4) + str(batch_idx).zfill(4) + ".data"
+            # Small dataset chunks (random sub-samples)
+            raise NotImplementedError
         else:
             path = str(img_idx).zfill(4) + ".data"
 
@@ -262,16 +268,33 @@ class CachingDataset(SynthesizableDataset, Dataset):
         # serialize and save
         torch.save(bundle.to("cpu").serialize(self.filters), save_path)
 
+    def cache_dataset(self):
+        # TODO(0) testskip = args.blender_stride, offset for a small dataset
+        # Unpacking data
+        bundle = self.load_dataset().to(self.device)
+
+        # Coordinates to sample from
+        self.init_sampling(bundle.hwf)
+
+        for img_idx in trange(bundle.size):
+            # Create data chunk bundle
+            sample = bundle[img_idx]
+            sample.ray_origins, sample.ray_directions = get_ray_bundle(*sample.hwf, sample.poses)
+            if self.cfg.dataset.use_ndc:
+                # Use normalized device coordinates
+                sample.ndc()
+
+            if self.cfg.dataset.caching.sample_all or self.type == DatasetType.VALIDATION:
+                self.save_dataset(sample, img_idx)
+            else:
+                raise NotImplementedError
+
     @property
     def dataset_path(self):
         return Path(self.cfg.dataset.basedir)
 
     @abstractmethod
     def load_dataset(self) -> DataBundle:
-        pass
-
-    @abstractmethod
-    def cache_dataset(self):
         pass
 
 
@@ -298,27 +321,6 @@ class BlenderDataset(CachingDataset):
 
         return bundle
 
-    def cache_dataset(self):
-        # testskip = args.blender_stride TODO(0)
-        # Unpacking blender data
-        bundle = self.load_dataset().to(self.device)
-
-        # Coordinates to sample from
-        self.init_sampling(bundle.hwf)
-
-        for img_idx in trange(bundle.size):
-            # Blender data chunk bundle
-            sample = bundle[img_idx]
-            sample.ray_origins, sample.ray_directions = get_ray_bundle(*sample.hwf, sample.poses)
-
-            if self.cfg.dataset.caching.sample_all or self.type == DatasetType.VALIDATION:
-                self.save_dataset(sample, img_idx)
-            else:
-                for batch_idx in range(self.cfg.dataset.caching.num_variations):
-                    fn = lambda x: batch_random_sampling(self.cfg, self.coords, x)
-                    sample = bundle.apply(fn, ["ray_directions", "ray_targets", "target_depth", "target_normals"])
-                    self.save_dataset(sample, img_idx, batch_idx)
-
 
 class ColmapDataset(CachingDataset):
     def __init__(self, cfg, spherify=True, type=DatasetType.TRAIN):
@@ -329,10 +331,11 @@ class ColmapDataset(CachingDataset):
         print("Loading Colmap Data...")
 
     def load_dataset(self):
-        images, poses, bounds, render_poses, i_test = load_llff_data(
+        images, pose_mats, bounds, render_poses, i_test = load_llff_data(
             self.dataset_path, factor=self.downscale_factor, spherify=self.spherify
         )
 
+        # Find train & validation partition
         samples_hold_count = self.cfg.dataset.llff_hold_step
         if samples_hold_count > 0:
             val_indices = np.arange(images.shape[0])[::samples_hold_count]
@@ -340,38 +343,26 @@ class ColmapDataset(CachingDataset):
             val_indices = np.array([i_test])
 
         train_indices = np.array([i for i in np.arange(images.shape[0]) if i not in val_indices])
+
+        # Select based on the dataset type
         target_indices = train_indices if self.type == DatasetType.TRAIN else val_indices
 
-        poses = torch.from_numpy(poses[target_indices, ...])
+        # Split manually into train and validation
+        pose_mats = torch.from_numpy(pose_mats[target_indices, ...])
         bounds = torch.from_numpy(bounds[target_indices, ...])
-        images = images[target_indices, ...]
+        images = torch.from_numpy(images[target_indices, ...])
 
-        poses, hwf = poses[:, :3, :4], poses[0, :3, -1]
+        # HWF is constant always
+        poses, hwf = pose_mats[:, :3, :4], tuple(pose_mats[0, :3, -1].long().tolist())
 
-        return images, poses, hwf, bounds
-
-    def cache_dataset(self):
-        pass
-    # def __len__(self):
-    #     if self.num_random_rays >= 0:
-    #         return int(self.ray_targets.shape[0] / self.num_random_rays)
-    #     else:
-    #         return self.ray_targets.shape[0]
-    #
-    # def __getitem__(self, idx):
-    #     if idx >= self.__len__():
-    #         raise IndexError("Not a valid batch number!")
-    #     if self.num_random_rays >= 0:
-    #         start = idx * self.num_random_rays
-    #         indices = slice(start, start + self.num_random_rays)
-    #     else:
-    #         indices = slice(idx, idx + 1)
-    #     # Select pose and image
-    #     ray_origin = self.all_ray_origins[indices]
-    #     ray_direction = self.all_ray_directions[indices]
-    #     ray_target = self.ray_targets[indices]
-    #     ray_bounds = self.ray_bounds[indices]
-    #     return (ray_origin, ray_direction, ray_bounds, ray_target)
+        # Colmap data bundle
+        return DataBundle(
+            ray_targets=images,
+            ray_bounds=bounds,
+            poses=poses,
+            hwf=hwf,
+            size=images.shape[0]
+        )
 
 
 class ScanNetDataset(Dataset):
