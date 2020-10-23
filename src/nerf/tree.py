@@ -91,6 +91,16 @@ class TreeSampling:
         # Initialize
         self.consolidate()
 
+    def ticked(self, step):
+        tree_config = self.config.tree
+        step_size_tree = tree_config.step_size_tree
+        step_size_integration_offset = tree_config.step_size_integration_offset
+        if step > step_size_integration_offset:
+            curr_step = step - step_size_integration_offset
+            return curr_step > 0 and curr_step % step_size_tree == 0
+
+        return False
+
     def flatten(self):
         vertices = []
         faces = []
@@ -237,9 +247,11 @@ class TreeSampling:
         inv_dirs = inv_dirs[:, None, None, :]
         bounds = bounds.transpose(0, 1)
 
+        # Min, max intersections
         tvmin = ((self.extract_(bounds, signs) - origins) * inv_dirs).squeeze(2)
         tvmax = ((self.extract_(bounds, inv_signs) - origins) * inv_dirs).squeeze(2)
 
+        # Keep track non-intersections
         mask = torch.ones((rays_count, voxels_count,), dtype = torch.bool, device = bounds.device)
 
         # y-axis filter & intersection
@@ -268,43 +280,39 @@ class TreeSampling:
         intersections = torch.stack((tvmin[..., 0], tvmax[..., 0]), -1)
 
         # mask outliers
-        mask = mask & ((intersections[..., 0] >= self.ray_near) | (intersections[..., 1] <= self.ray_far))
         ray_mask = mask.sum(-1) > 0
-
-        intersections = intersections[ray_mask]
 
         # see this https://github.com/pytorch/pytorch/issues/43768
         ray_rel = ray_mask.sum()
         if ray_rel == 0:
             indices = torch.ones(0, samples_count, device = bounds.device)
 
-            return torch.rand_like(indices), indices.long(), intersections, ray_mask
+            return torch.rand_like(indices), indices.long(), ray_mask
 
         if self.config.tree.use_voxel_random_sampling:
             # apply small weight for non-intersections
             weights = torch.ones((rays_count, voxels_count,), device = bounds.device)
-            weights[~mask] = 1e-13
-            weights = weights[ray_mask]
+
+            # apply noise
+            weights[~mask] = 1e-12
 
             # sample intersections
             samples = torch.multinomial(weights, samples_count, replacement = True)
         else:
             # uniform interleaved deterministic sampling
-            samples = self.uniform_sampling_(mask[ray_mask], samples_count)
+            samples = self.uniform_sampling_(mask, samples_count)
 
+        # Gather intersection samples
         samples_indices = samples[..., None].expand(-1, -1, 2)
-
-        # clamp expected samples and gather intersection samples
-        intersections = intersections.clamp(self.ray_near, self.ray_far)
         values = intersections.gather(-2, samples_indices)
 
         values_min, values_max = values[..., 0], values[..., 1]
         if self.config.tree.use_depth_random_sampling:
-            # random sampling
+            # Random sampling
             value_samples = torch.rand_like(values_min, device = bounds.device)
             z_vals = values_min + (values_max - values_min) * value_samples
         else:
-            # deterministic sampling (not the most efficient one)
+            # Deterministic sampling
             minxx = values_min.min(-1).values
             maxxx = values_max.max(-1).values
 
@@ -314,7 +322,7 @@ class TreeSampling:
         z_vals, indices_ordered = z_vals.sort(-1)
         indices = samples.gather(-1, indices_ordered)
 
-        return z_vals, indices, intersections, ray_mask
+        return z_vals, indices, ray_mask
 
     def serialize(self):
         return {

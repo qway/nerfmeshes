@@ -29,6 +29,7 @@ class BaseModel(pl.LightningModule):
             self.cfg.nerf.train.radiance_field_noise_std,
             self.cfg.nerf.validation.radiance_field_noise_std,
             self.cfg.dataset.white_background,
+            attenuation_threshold=1e-5
         )
 
         # Dataset types

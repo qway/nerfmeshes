@@ -32,40 +32,44 @@ class LoggerDepthProjection:
 
 
 class LoggerTreeWeights:
-    def __init__(self, step_size, name):
+    def __init__(self, tree, name):
         super(LoggerTreeWeights, self).__init__()
-        self.step_size = step_size
+        self.tree = tree
         self.name = name
 
-    def tick(self, logger, step, tree):
-        if step % self.step_size == 0 and step > 0:
-            y = tree.memm.sort().values.cpu().detach().numpy()
+        # Logger step
+        self.counter = 0
+
+    def tick(self, logger, step):
+        if self.tree.ticked(step):
+            y = self.tree.memm.sort().values.cpu().detach().numpy()
             x = torch.arange(0, y.shape[0]).cpu().detach().numpy()
 
-            # Logger step
-            global_step = step // self.step_size
-
+            # Plot figure
             fig = plt.figure(figsize = (15, 10))
             plt.plot(x, y)
 
-            logger.add_figure(self.name, fig, global_step = global_step, close = True)
+            logger.add_figure(self.name, fig, global_step = self.counter, close = True)
+
+            self.counter += 1
 
 
 class LoggerTree:
-    def __init__(self, step_size, name):
+    def __init__(self, tree, name):
         super(LoggerTree, self).__init__()
-        self.step_size = step_size
+        self.tree = tree
         self.name = name
+        # Logger step
+        self.counter = 0
 
-    def tick(self, logger, step, tree):
-        if step % self.step_size == 0:
-            vertices, faces, colors = tree.flatten()
+    def tick(self, logger, step):
+        if self.tree.ticked(step):
+            vertices, faces, colors = self.tree.flatten()
             vertices, faces, colors = vertices.unsqueeze(0), faces.unsqueeze(0), colors.unsqueeze(0)
 
-            # Logger step
-            global_step = step // self.step_size
+            logger.add_mesh(self.name, vertices=vertices, colors=colors, faces=faces, global_step = self.counter)
 
-            logger.add_mesh(self.name, vertices=vertices, colors=colors, faces=faces, global_step = global_step)
+            self.counter += 1
 
 
 class LoggerDepthLoss:

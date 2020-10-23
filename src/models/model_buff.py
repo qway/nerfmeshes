@@ -19,13 +19,13 @@ class BuFFModel(BaseModel):
         # Create a tree for sampling
         self.tree = TreeSampling(cfg, "cuda" if torch.cuda.is_available() else "cpu")
 
-        # Sampling Interval
-        self.sample_interval = RaySampleInterval()
+        # Modules
+        self.sampler = RaySampleInterval(self.cfg.nerf.train.num_coarse)
 
         # Loggers
-        self.logger_depth_projection = LoggerDepthProjection(cfg.logging.projection_step_size, 'train/point_cloud')
-        self.logger_tree_weights = LoggerTreeWeights(cfg.tree.step_size_tree, "Tree Memm")
-        self.logger_tree = LoggerTree(cfg.tree.step_size_tree, "Tree")
+        self.logger_depth_projection = LoggerDepthProjection(cfg.logging.projection_step_size, 'Point Cloud')
+        self.logger_tree_weights = LoggerTreeWeights(self.tree, "Tree Memm")
+        self.logger_tree = LoggerTree(self.tree, "Tree")
         self.logger_depth_loss = LoggerDepthLoss("train", self.cfg.dataset.empty)
 
     def get_model(self):
@@ -46,11 +46,11 @@ class BuFFModel(BaseModel):
 
         # Generating depth samples
         ray_count = ray_directions.shape[0]
-        ray_intervals = self.sample_interval(nerf_cfg, ray_count, nerf_cfg.num_coarse, near, far)
+        ray_samples = self.sampler(nerf_cfg, ray_count, near, far)
 
-        z_vals_t, indices, intersections, mask = self.tree.batch_ray_voxel_intersect(ray_origins.detach(), ray_directions.detach(), samples_count=nerf_cfg.num_coarse)
-        ray_intervals_t = ray_intervals.clone().detach()
-        ray_intervals_t[mask] = z_vals_t
+        # Update the samples
+        ray_intervals, indices, mask = self.tree.batch_ray_voxel_intersect(ray_origins, ray_directions, samples_count=nerf_cfg.num_coarse)
+        ray_intervals[~mask] = ray_samples[~mask]
 
         # Samples across each ray (num_rays, samples_count, 3)
         ray_samples = intervals_to_ray_points(ray_intervals, ray_directions, ray_origins)
@@ -64,7 +64,7 @@ class BuFFModel(BaseModel):
 
         if self.training:
             # Perform ray batch integration into the tree
-            self.tree.ray_batch_integration(self.global_step, indices, bundle.weights[mask].detach(), bundle.weights_mask[mask].detach())
+            self.tree.ray_batch_integration(self.global_step, indices[mask], bundle.weights[mask].detach(), bundle.mask_weights[mask].detach())
 
         return bundle
 
@@ -97,15 +97,14 @@ class BuFFModel(BaseModel):
 
         # Loggers
         self.logger_depth_projection.tick(logger, self.global_step, bundle.ray_origins, bundle.ray_directions, output_bundle.depth_map, bundle.target_depth)
-        self.logger_tree_weights.tick(logger, self.global_step, self.tree)
+        self.logger_tree_weights.tick(logger, self.global_step)
 
         # Tree consolidation
-        step_size_tree = self.cfg.tree.step_size_tree
-        if self.global_step % step_size_tree == 0 and self.global_step > 0:
+        if self.tree.ticked(self.global_step):
             self.tree.consolidate()
 
         # Log tree structure after consolidation
-        self.logger_tree.tick(logger, self.global_step, self.tree)
+        self.logger_tree.tick(logger, self.global_step)
 
         return {
             "loss": loss,
@@ -139,7 +138,7 @@ class BuFFModel(BaseModel):
         rgb_map = torch.cat(rgb_chunks, 0)
         self.logger.experiment.add_image(
             "validation/rgb_coarse/" + str(batch_idx),
-            cast_to_image(rgb_map.view(self.val_dataset.H, self.val_dataset.W, 3)),
+            cast_to_image(rgb_map.view(bundle.hwf[0], bundle.hwf[1], 3)),
             self.global_step,
         )
 
@@ -152,7 +151,7 @@ class BuFFModel(BaseModel):
         self.logger.experiment.add_image(
             "validation/img_target/" + str(batch_idx),
             cast_to_image(
-                bundle.ray_targets.view(self.val_dataset.H, self.val_dataset.W, 3)
+                bundle.ray_targets.view(bundle.hwf[0], bundle.hwf[1], 3)
             ),
             self.global_step,
         )

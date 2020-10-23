@@ -42,11 +42,11 @@ tree:
   # Depth random sampling instead of linearly non-randomly
   use_depth_random_sampling: True
   # Max tree voxels
-  max_voxel_count: 2048
+  max_voxel_count: 1536
   # Step size before ticking ray batch integration (initially the scene is unresolved)
   step_size_integration_offset: 6000
   # Step size consolidation
-  step_size_tree: 12000
+  step_size_tree: 6000
 
 # Logging parameters
 logging:
@@ -55,7 +55,7 @@ logging:
   # Project 2D points into synthetic world space
   use_projection: True
   # Step size for use_projection
-  projection_step_size: 5000
+  projection_step_size: 15000
 
 # Dataset parameters.
 dataset:
@@ -87,11 +87,11 @@ dataset:
   # Caching parameters (works only on Blender, LLFF).
   caching:
     # Use cached dataset, if it's not created, create one.
-    use_caching: False
+    use_caching: True
     # Override existing cached dataset when new changes are done to the dataset loader.
-    override_caching: False
+    override_caching: True
     # Overrides basedir path to the following pre-cached dataset dir.
-    cache_dir: ../cache/syn-lego-cache
+    cache_dir: ../cache/syn-buff-lego-cache
     # Number of random ray batches to draw per image as infinite data can't be cached.
     num_variations: 4
     # Sample all rays for the image and perform ray-batching during runtime.
@@ -139,7 +139,7 @@ models:
   # Name of the torch.nn.Module class that implements the model.
   fine_type: FlexibleNeRFModel
   # Whether to use the final model.
-  use_fine: True
+  use_fine: False
   # Fine model parameters.
   fine:
     # Number of layers in the model.
@@ -207,9 +207,9 @@ nerf:
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
-    num_coarse: 64
+    num_coarse: 192
     # Number of depth samples per ray for the fine network.
-    num_fine: 128
+    num_fine: 64
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
     radiance_field_noise_std: 0.2
@@ -223,9 +223,9 @@ nerf:
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
-    num_coarse: 64
+    num_coarse: 192
     # Number of depth samples per ray for the fine network.
-    num_fine: 128
+    num_fine: 64
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
     radiance_field_noise_std: 0.

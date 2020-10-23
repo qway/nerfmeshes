@@ -3,7 +3,7 @@ import torch
 from models import BaseModel
 from models.model_helpers import intervals_to_ray_points
 from typing import Tuple
-from nerf import models, cast_to_image, RaySampleInterval, SamplePDF
+from nerf import models, cast_to_image, SamplePDF, RaySampleInterval
 from data.data_helpers import DataBundle
 
 
@@ -24,14 +24,12 @@ class NeRFModel(BaseModel):
     def __init__(self, cfg, *args, **kwargs):
         super(NeRFModel, self).__init__(cfg, *args, **kwargs)
 
+        # Create NeRF models
         self.model_coarse, self.model_fine = create_models(self.cfg)
-        # samples_total =  self.cfg.nerf.train.num_coarse
-        # if self.cfg.models.use_fine:
-        #     samples_total = max(samples_total, samples_total + self.cfg.nerf.train.num_fine)
 
         # Custom modules
-        self.sample_interval = RaySampleInterval()
         self.sample_pdf = SamplePDF(self.cfg.nerf.train.num_fine)
+        self.sampler = RaySampleInterval(self.cfg.nerf.train.num_coarse)
 
     def get_model(self):
         return self.model_fine if self.model_fine is not None else self.model_coarse
@@ -51,7 +49,7 @@ class NeRFModel(BaseModel):
 
         # Generating depth samples
         ray_count = ray_directions.shape[0]
-        ray_intervals = self.sample_interval(nerf_cfg, ray_count, nerf_cfg.num_coarse, near, far)
+        ray_intervals = self.sampler(nerf_cfg, ray_count, near, far)
 
         # Samples across each ray (num_rays, samples_count, 3)
         ray_points = intervals_to_ray_points(ray_intervals, ray_directions, ray_origins)

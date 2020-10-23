@@ -79,7 +79,7 @@ def main():
         gpus=config_args.gpus,
         default_root_dir=path_parser.log_dir,
         logger=logger,
-        num_sanity_val_steps=1,
+        num_sanity_val_steps=0,
         checkpoint_callback=checkpoint_callback,
         row_log_interval=1,
         log_gpu_memory=None,

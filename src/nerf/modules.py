@@ -2,7 +2,7 @@ import math
 import torch
 
 from nerf import cumprod_exclusive
-from dataclasses import astuple, dataclass, fields
+from dataclasses import dataclass
 
 
 class PositionalEncoding(torch.nn.Module):
@@ -53,12 +53,12 @@ class VolumeRenderer(torch.nn.Module):
             train_radiance_field_noise_std = 0.0,
             val_radiance_field_noise_std = 0.0,
             white_background = False,
-            attenuation=1e-3
+            attenuation_threshold=1e-3
     ):
         super(VolumeRenderer, self).__init__()
         self.train_radiance_field_noise_std = train_radiance_field_noise_std
         self.val_radiance_field_noise_std = val_radiance_field_noise_std
-        self.attenuation = attenuation
+        self.attenuation_threshold = attenuation_threshold
         self.white_background = white_background
         one_e_10 = torch.tensor([1e10])
         one_e_10.requires_grad = False
@@ -94,7 +94,7 @@ class VolumeRenderer(torch.nn.Module):
         alpha = 1.0 - torch.exp(-sigma_a * dists)
 
         weight_attenuation = cumprod_exclusive(1.0 - alpha + 1e-10)
-        mask_weights = (weight_attenuation > self.attenuation).float()
+        mask_weights = (weight_attenuation > self.attenuation_threshold).float()
         weights = alpha * weight_attenuation
 
         rgb_map = weights[..., None] * rgb
@@ -146,25 +146,27 @@ class DensityExtractor(torch.nn.Module):
 
 
 class RaySampleInterval(torch.nn.Module):
-    def __init__(self):
+    def __init__(self, count):
         super(RaySampleInterval, self).__init__()
+        self.count = count
 
-    def forward(self, cfg, ray_count, samples_count, near, far):
         # Ray sample count
-        point_intervals = torch.linspace(0.0, 1.0, samples_count, device = "cuda")[None, :]
+        point_intervals = torch.linspace(0.0, 1.0, self.count, requires_grad = False)[None, :]
+        self.register_buffer("point_intervals", point_intervals, persistent = False)
 
+    def forward(self, cfg, ray_count, near, far):
         if len(near.shape) > 0 and near.shape[0] == ray_count:
             near, far = near[:, None], far[:, None]
 
         # Sample in disparity space, as opposed to in depth space. Sampling in disparity is
         # nonlinear when viewed as depth sampling! (The closer to the camera the more samples)
         if not cfg.lindisp:
-            point_intervals = near * (1.0 - point_intervals) + far * point_intervals
+            point_intervals = near * (1.0 - self.point_intervals) + far * self.point_intervals
         else:
-            point_intervals = 1.0 / (1.0 / near * (1.0 - point_intervals) + 1.0 / far * point_intervals)
+            point_intervals = 1.0 / (1.0 / near * (1.0 - self.point_intervals) + 1.0 / far * self.point_intervals)
 
         if len(near.shape) == 0 or near.shape[0] != ray_count:
-            point_intervals = point_intervals.expand([ ray_count, samples_count ])
+            point_intervals = point_intervals.expand([ ray_count, self.count ])
 
         if cfg.perturb:
             # Get intervals between samples.
@@ -181,7 +183,7 @@ class RaySampleInterval(torch.nn.Module):
 
             point_intervals = lower + (upper - lower) * t_rand
 
-        return point_intervals.detach()
+        return point_intervals
 
 
 class SamplePDF(torch.nn.Module):
