@@ -36,11 +36,9 @@ tree:
   # Max tree depth, higher requires more memory
   max_depth: 4
   # Threshold weight for pruning
-  eps: 0.001
-  # Voxel random sampling instead of linearly non-randomly
-  use_voxel_random_sampling: True
-  # Depth random sampling instead of linearly non-randomly
-  use_depth_random_sampling: True
+  eps: 0.0001
+  # Voxel random sampling instead of linearly deterministically
+  use_random_sampling: False
   # Max tree voxels
   max_voxel_count: 1536
   # Step size before ticking ray batch integration (initially the scene is unresolved)
@@ -89,7 +87,7 @@ dataset:
     # Use cached dataset, if it's not created, create one.
     use_caching: True
     # Override existing cached dataset when new changes are done to the dataset loader.
-    override_caching: True
+    override_caching: False
     # Overrides basedir path to the following pre-cached dataset dir.
     cache_dir: ../cache/syn-buff-lego-cache
     # Number of random ray batches to draw per image as infinite data can't be cached.

@@ -205,7 +205,7 @@ class PathParser:
             os.makedirs(Path(self.log_root_dir) / self.log_name, exist_ok=True)
             # Create logger instance
             logger = TensorBoardLogger(self.log_root_dir, self.log_name, version=self.log_version)
-            print("New logger initiated...")
+            print("Logger initiated...")
 
             # Logger log dir, if conflicting log_version
             self.log_dir = Path(logger.log_dir)

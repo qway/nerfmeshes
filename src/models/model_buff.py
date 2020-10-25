@@ -14,16 +14,16 @@ class BuFFModel(BaseModel):
         super(BuFFModel, self).__init__(cfg, *args, **kwargs)
 
         # Primary model
-        self.model = getattr(models, cfg.models.coarse_type)(**cfg.models.coarse)
+        self.model = getattr(models, self.cfg.models.coarse_type)(**self.cfg.models.coarse)
 
         # Create a tree for sampling
-        self.tree = TreeSampling(cfg, "cuda" if torch.cuda.is_available() else "cpu")
+        self.tree = TreeSampling(self.cfg, "cuda" if torch.cuda.is_available() else "cpu")
 
         # Modules
         self.sampler = RaySampleInterval(self.cfg.nerf.train.num_coarse)
 
         # Loggers
-        self.logger_depth_projection = LoggerDepthProjection(cfg.logging.projection_step_size, 'Point Cloud')
+        self.logger_depth_projection = LoggerDepthProjection(self.cfg.logging.projection_step_size, 'Point Cloud')
         self.logger_tree_weights = LoggerTreeWeights(self.tree, "Tree Memm")
         self.logger_tree = LoggerTree(self.tree, "Tree")
         self.logger_depth_loss = LoggerDepthLoss("train", self.cfg.dataset.empty)

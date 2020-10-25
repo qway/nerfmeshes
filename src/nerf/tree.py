@@ -232,10 +232,10 @@ class TreeSampling:
         Args:
             origins (torch.Tensor): Tensor (1x3) whose elements define the ray origin positions.
             dirs (torch.Tensor): Tensor (Rx3) whose elements define the ray directions.
-
         Returns:
-            intersections (torch.Tensor): min/max intersections ray direction scalars
+            z_vals (torch.Tensor): intersection samples as ray direction scalars
             indices (torch.Tensor): indices of valid intersections
+            ray_mask (torch.Tensor): ray mask where valid intersections
         """
         bounds = self.voxels
         rays_count, voxels_count = dirs.shape[0], bounds.shape[0],
@@ -285,11 +285,11 @@ class TreeSampling:
         # see this https://github.com/pytorch/pytorch/issues/43768
         ray_rel = ray_mask.sum()
         if ray_rel == 0:
-            indices = torch.ones(0, samples_count, device = bounds.device)
+            indices = torch.ones(rays_count, samples_count, device = bounds.device)
 
             return torch.rand_like(indices), indices.long(), ray_mask
 
-        if self.config.tree.use_voxel_random_sampling:
+        if self.config.tree.use_random_sampling:
             # apply small weight for non-intersections
             weights = torch.ones((rays_count, voxels_count,), device = bounds.device)
 
@@ -298,28 +298,58 @@ class TreeSampling:
 
             # sample intersections
             samples = torch.multinomial(weights, samples_count, replacement = True)
-        else:
-            # uniform interleaved deterministic sampling
-            samples = self.uniform_sampling_(mask, samples_count)
 
-        # Gather intersection samples
-        samples_indices = samples[..., None].expand(-1, -1, 2)
-        values = intersections.gather(-2, samples_indices)
+            # Gather intersection samples
+            samples_indices = samples[..., None].expand(-1, -1, 2)
+            values = intersections.gather(-2, samples_indices)
 
-        values_min, values_max = values[..., 0], values[..., 1]
-        if self.config.tree.use_depth_random_sampling:
             # Random sampling
+            values_min, values_max = values[..., 0], values[..., 1]
             value_samples = torch.rand_like(values_min, device = bounds.device)
             z_vals = values_min + (values_max - values_min) * value_samples
         else:
-            # Deterministic sampling
-            minxx = values_min.min(-1).values
-            maxxx = values_max.max(-1).values
+            # Sort the intersections and mask of relevant crosses by min crossing
+            crosses_sorted = intersections[..., 0].sort(-1)
+            crosses_samples = crosses_sorted.indices[..., None].expand(*crosses_sorted.indices.shape, 2)
+            intersections = intersections.gather(-2, crosses_samples)
+            crosses_mask_sorted = mask.gather(-1, crosses_sorted.indices)
 
-            value_samples = torch.linspace(0., 1., samples_count, device = bounds.device).expand(values_min.shape)
-            z_vals = minxx[:, None] + (maxxx - minxx)[:, None] * value_samples
+            # Roll relevant crosses at the start
+            crosses_start = crosses_mask_sorted.long().sort(descending=True)
+            crosses_start_mask = crosses_start.values.bool()
+            res = torch.zeros_like(intersections)
+            res[crosses_start_mask] = intersections[crosses_mask_sorted]
 
+            # Distance crosses
+            residuals = res[..., 1] - res[..., 0]
+
+            # Cumulative sum distances
+            residuals_cums = torch.cumsum(residuals, -1)
+
+            # Sampling interval scaled by the total cross distance
+            samples = torch.linspace(0, 1.0, samples_count, device = bounds.device)
+            samples = samples * residuals_cums[..., -1][..., None]
+
+            # Cross bucket indices
+            cross_indices = torch.searchsorted(residuals_cums, samples)
+
+            # Group by bucket (crosses) as offset from start (0, 0, 2, 2, 4, 4, 4, ...)
+            samples_positions = torch.searchsorted(cross_indices, cross_indices, right=False)
+
+            # Find the sample offset relative to the bucket (cross) 1st sample closest to the near plane
+            samples_offset = samples - samples.gather(-1, samples_positions)
+
+            # Min cross translate by the offset
+            z_vals = res[..., 0].gather(-1, cross_indices) + samples_offset
+
+            # Map indices to the corresponding voxels
+            indices = crosses_start.indices.gather(-1, cross_indices)
+            samples = crosses_sorted.indices.gather(-1, indices)
+
+        # Order the samples
         z_vals, indices_ordered = z_vals.sort(-1)
+
+        # Order voxels indices relative to the samples
         indices = samples.gather(-1, indices_ordered)
 
         return z_vals, indices, ray_mask

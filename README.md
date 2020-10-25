@@ -5,7 +5,7 @@ Extension of the NeRF (Neural Radiance Fields) method using PyTorch (PyTorch Lig
 
 Based on the official implementation: [nerf](https://github.com/bmild/nerf)
 
-### [Paper](https://drive.google.com/drive/folders/1nssFxbSrTGOkNVSN3klsHh9RJg_ik5YF?usp=sharing) | [Data](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1)
+### [Paper](https://drive.google.com/file/d/1t2ugLYxwM9IEW8j4al1OoPQgphj4TEw6/view?usp=sharing) | [Data](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1)
 
  [Benedikt Wiberg](https://github.com/qway) <sup>1</sup> <sup>\*</sup>,
  [Cristian Chivriga](https://github.com/DomainFlag) <sup>1</sup> <sup>\*</sup>,
