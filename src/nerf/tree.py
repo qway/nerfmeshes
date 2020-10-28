@@ -212,22 +212,7 @@ class TreeSampling:
 
         return out[:, :, None, :]
 
-    def uniform_sampling_(self, tensor, count):
-        indices = torch.arange(0, tensor.shape[-1], device = tensor.device).expand(tensor.shape)
-        samples_count = tensor.long().sum(-1)
-        output = tensor.long() * (count // samples_count)[:, None]
-        remainder = count - output.sum(-1)
-
-        rem1 = torch.stack((remainder, tensor.sum(-1) - remainder), -1).flatten()
-        rem2 = torch.stack((torch.ones_like(remainder), torch.zeros_like(remainder)), -1).flatten()
-        remaining = rem2.repeat_interleave(rem1, 0)
-
-        output[tensor > 0] += remaining
-        samples = indices[tensor].repeat_interleave(output[tensor], -1).view(-1, count)
-
-        return samples
-
-    def batch_ray_voxel_intersect(self, origins, dirs, samples_count = 64):
+    def batch_ray_voxel_intersect(self, origins, dirs, near, far, samples_count = 64):
         """ Returns batch of min and max intersections with their indices.
         Args:
             origins (torch.Tensor): Tensor (1x3) whose elements define the ray origin positions.
@@ -278,6 +263,9 @@ class TreeSampling:
 
         # find intersection scalars within range [ near, far ]
         intersections = torch.stack((tvmin[..., 0], tvmax[..., 0]), -1)
+
+        # ray cap
+        mask = mask & ((intersections[..., 0] >= near) & (intersections[..., 1] <= far))
 
         # mask outliers
         ray_mask = mask.sum(-1) > 0

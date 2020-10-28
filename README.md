@@ -5,7 +5,7 @@ Extension of the NeRF (Neural Radiance Fields) method using PyTorch (PyTorch Lig
 
 Based on the official implementation: [nerf](https://github.com/bmild/nerf)
 
-### [Paper](https://drive.google.com/file/d/1t2ugLYxwM9IEW8j4al1OoPQgphj4TEw6/view?usp=sharing) | [Data](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1)
+### [Paper](https://drive.google.com/file/d/1PFV_9x3vZ2UaQjL8jXRVGoWSe0YU7IjC/view?usp=sharing) | [Data](https://drive.google.com/drive/folders/128yBriW1IG_3NJ5Rp7APSTZsJqdJdfc1)
 
  [Benedikt Wiberg](https://github.com/qway) <sup>1</sup> <sup>\*</sup>,
  [Cristian Chivriga](https://github.com/DomainFlag) <sup>1</sup> <sup>\*</sup>,
@@ -25,7 +25,7 @@ NeRF (Neural radiance field) optimizes directly the parameters of continuous 5D 
 </p>
 
 The project is an extension and improvement upon the original method NeRF for neural rendering view-synthesis designed for rapid prototyping and experimentation. Main improvements are: 
- - Scene encoding through unstructured radiance volumes for efficient sampling.
+ - Scene encoding through unstructured radiance volumes for efficient sampling via Axis-Aligned Bounding Boxes (AABBs) intersections.
  - Mesh reconstruction with appearance through informed re-sampling based on the inverse normals of the scene geometry via Marching Cubes. 
  - Modular implementation which is 1.4x faster and at most twice as much memory efficient then the base implementation [NeRF-PyTorch](https://github.com/krrish94/nerf-pytorch).
  
@@ -85,7 +85,7 @@ python train_nerf.py --config config/lego.yml
 
 To resume training from latest checkpoint:
 ```bash
-python train_nerf.py --log-checkpoint your_log_dir_path
+python train_nerf.py --log-checkpoint ../pretrained/colab-lego-nerf-high-res/default/version_0/
 ```
 
 #### Extracting Mesh with appearance

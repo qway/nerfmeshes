@@ -178,18 +178,15 @@ def export_marching_cubes(model, args, cfg, device):
         print("Diffuse map query with view dependence...")
         ray_bounds = torch.tensor([0., args.view_disparity_max_bound], dtype=directions.dtype)
 
-        # Eases batchifying
-        ray_bounds = ray_bounds.expand(directions.shape[0], 2)
-
         # Query with view dependence
         # Move ray origins slightly towards negative sdf
         ray_origins = targets - args.view_disparity * directions
 
         print("Started ray-casting")
-        batch_generator = batchify(ray_origins, directions, ray_bounds, batch_size=args.batch_size, device=device)
-        for (ray_origins, ray_directions, ray_bounds) in batch_generator:
+        batch_generator = batchify(ray_origins, directions, batch_size=args.batch_size, device=device)
+        for (ray_origins, ray_directions) in batch_generator:
             # View dependent diffuse batch queried
-            output_bundle = model.query((ray_origins, ray_directions, ray_bounds.transpose(0, 1)))
+            output_bundle = model.query((ray_origins, ray_directions, ray_bounds))
 
             # Accumulate diffuse
             diffuse.append(output_bundle.rgb_map.cpu())

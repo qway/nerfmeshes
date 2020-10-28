@@ -1,11 +1,11 @@
 # Parameters to setup experiment.
 experiment:
   # Unique experiment identifier
-  id: nerf-colmap-fern
+  id: buff-colmap-fern
   # Base model, whether to use tree voxel sampling (BuFFModel) instead of hierarchical sampling (NeRFModel)
-  model: NeRFModel
+  model: BuFFModel
   # Experiment description
-  description: High res colmap fern nerf model.
+  description: High res colmap fern buff model.
   # Experiment logs will be stored at "logdir"/"id"
   logdir: ../logs
   # Seed for random number generators (for repeatability).
@@ -112,7 +112,7 @@ models:
     # Number of view dependent layers (-1 for no view dependence)
     num_layers_view: -1
     # Size of the hidden layers
-    hidden_size: 128
+    hidden_size: 256
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
@@ -137,7 +137,7 @@ models:
   # Name of the torch.nn.Module class that implements the model.
   fine_type: FlexibleNeRFModel
   # Whether to use the final model.
-  use_fine: True
+  use_fine: False
   # Fine model parameters.
   fine:
     # Number of layers in the model.
@@ -203,14 +203,14 @@ nerf:
     # the network)
     chunksize: 2048
     # Whether or not to perturb the sampled depth values.
-    perturb: True
+    perturb: False
     # Number of depth samples per ray for the coarse network.
-    num_coarse: 64
+    num_coarse: 192
     # Number of depth samples per ray for the fine network.
     num_fine: 64
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
-    radiance_field_noise_std: 0.4
+    radiance_field_noise_std: 0.2
     # Sample linearly in disparity space, as opposed to in depth space.
     lindisp: False
   # Validation-specific parameters.
@@ -221,7 +221,7 @@ nerf:
     # Whether or not to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
-    num_coarse: 64
+    num_coarse: 192
     # Number of depth samples per ray for the fine network.
     num_fine: 64
     # Standard deviation of noise to be added to the radiance field when

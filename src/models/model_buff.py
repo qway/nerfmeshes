@@ -49,7 +49,7 @@ class BuFFModel(BaseModel):
         ray_samples = self.sampler(nerf_cfg, ray_count, near, far)
 
         # Update the samples
-        ray_intervals, indices, mask = self.tree.batch_ray_voxel_intersect(ray_origins, ray_directions, samples_count=nerf_cfg.num_coarse)
+        ray_intervals, indices, mask = self.tree.batch_ray_voxel_intersect(ray_origins, ray_directions, near, far, samples_count=nerf_cfg.num_coarse)
         ray_intervals[~mask] = ray_samples[~mask]
 
         # Samples across each ray (num_rays, samples_count, 3)

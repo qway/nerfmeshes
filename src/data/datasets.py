@@ -202,13 +202,6 @@ class CachingDataset(SynthesizableDataset, Dataset):
 
             size = self.data_bundle.size
 
-            # if self.shuffle:
-            #     shuffled_indices = np.arange(self.data_bundle.ray_targets.shape[0])
-            #     np.random.shuffle(shuffled_indices)
-            #
-            #     for field in fields(self.data_bundle):
-            #         setattr(self.data_bundle, field.name, getattr(self.data_bundle, field.name)[shuffled_indices])
-
         time_last = time.time() - start_time
         if self.cfg.dataset.caching.use_caching:
             print(f"Using cached dataset in {time_last}s seconds with {size} assets...")
