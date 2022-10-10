@@ -1,8 +1,10 @@
+import os
 import torch
 import numpy as np
 import torchvision
 
 from tqdm import tqdm
+from pathlib import Path
 
 POINT_GROUND_TRUTH = torch.tensor([ 0., 0., 255. ])
 POINT_OUT_TRUE = torch.tensor([ 0., 255., 0. ])
@@ -53,13 +55,31 @@ def get_point_clouds(ray_origins, ray_directions, depth_output, depth_target = N
     return point_cloud
 
 
-def create_point_cloud(ray_origins, ray_directions, depth, color, mask = None):
+def create_point_cloud(ray_origins, ray_directions, depth, color, mask = None, shading = True, min_weight = 0.1, max_weight = 1.0, add_camera = True):
+    assert min_weight < max_weight, f"Interpolation range should be valid by [{min_weight}, {max_weight}]"
     if mask is not None:
         ray_directions, depth = ray_directions[mask], depth[mask]
 
     vertices = (ray_origins + ray_directions * depth[..., None]).view(-1, 3)
-    diffuse = color.expand(vertices.shape)
+    diffuse = color.expand(vertices.shape).to(vertices.device)
+    if shading:
+        # Target boundaries.
+        max_depth = depth.max()
+        min_depth = depth.min()
+
+        # Add slightly better contrast (can be tweaked more).
+        t = (1.0 - (depth[..., None] - min_depth) / (max_depth - min_depth)) * (max_weight - min_weight) + min_weight
+
+        # TODO: we can extend by using the output RGB map if it's sufficiently dense.
+        diffuse = diffuse.contiguous() * t
+
+    # Not the best but it's sufficient for our purposes.
     normals = -ray_directions.view(-1, 3)
+
+    if add_camera:
+        # Optionally add the camera as a single point for debugging.
+        vertices = torch.cat((vertices, ray_origins), dim = 0)
+        diffuse = torch.cat((diffuse, color[None, :].to(diffuse.device)), dim = 0)
 
     return vertices, diffuse, normals
 
@@ -83,17 +103,21 @@ def comp_depth(depth_output, depth_target, empty_value = 0.):
     return depth_loss, depth_empty, depth_space, depth_l1
 
 
-def export_obj(vertices, triangles, diffuse, normals, filename):
+def export_obj(file_path, vertices, triangles, normals, diffuse = None):
     """
     Exports a mesh in the (.obj) format.
     """
     print('Writing to obj...')
 
-    with open(filename, "w") as fh:
+    # Create the directory if it doesn't exist.
+    os.makedirs(Path(file_path).parent, exist_ok = True)
+
+    print(f"Total vertices {len(vertices)}")
+    with open(file_path, "w") as fh:
 
         for index, v in enumerate(vertices):
             fh.write("v {} {} {}".format(*v))
-            if len(diffuse) > index:
+            if diffuse is not None and len(diffuse) > index:
                 fh.write(" {} {} {}".format(*diffuse[index]))
 
             fh.write("\n")
@@ -108,7 +132,7 @@ def export_obj(vertices, triangles, diffuse, normals, filename):
 
             fh.write("\n")
 
-    print(f"Finished writing to {filename} with {len(vertices)} vertices")
+    print(f"Finished writing to {file_path} with {len(vertices)} vertices")
 
 
 def batchify(*data, batch_size=1024, device="cpu", progress=True):

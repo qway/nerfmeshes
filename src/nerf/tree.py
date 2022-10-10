@@ -13,7 +13,6 @@ class Node:
             self.count = self.config.tree.subdivision_inner_count
 
         self.weight = 0.
-        self.sparse = True
         self.children = []
 
     def subdivide(self):
@@ -70,7 +69,7 @@ class TreeSampling:
 
     def __init__(self, config, device):
         self.config = config
-        self.device = device
+        self.device = "cpu"
 
         # Initial bounds, normalized
         self.ray_near, self.ray_far = self.config.dataset.near, self.config.dataset.far
@@ -124,7 +123,7 @@ class TreeSampling:
 
         return vertices, faces, colors
 
-    def consolidate(self, split = False):
+    def consolidate(self):
         if self.memm is not None:
             print(f"Min memm {self.memm.min()}")
             print(f"Max memm {self.memm.max()}")
@@ -163,13 +162,13 @@ class TreeSampling:
                 else:
                     children.append(child)
 
-            print(f"Now {len(children)} voxels")
             self.root.children = children
 
         self.voxels = [ torch.stack(node.bounds, 0) for node in self.root.children ]
         if len(self.voxels) == 0:
             print(f"The chosen threshold {self.config.tree.eps} was set too high!")
 
+        print(f"Tree has {len(self.voxels)} voxels.")
         self.voxels = torch.stack(self.voxels, 0).to(self.device)
         self.memm = torch.zeros(self.voxels.shape[0], ).to(self.device)
         self.counter = 1

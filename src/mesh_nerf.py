@@ -5,7 +5,7 @@ import torch
 import models
 
 from importlib import import_module
-from pytorch3d.structures import Meshes
+# from pytorch3d.structures import Meshes
 from skimage import measure
 from nerf.nerf_helpers import export_obj, batchify
 from lightning_modules import PathParser
@@ -19,7 +19,7 @@ def create_mesh(vertices, faces_idx):
     vertices = vertices / scale
 
     # We construct a Meshes structure for the target mesh
-    target_mesh = Meshes(verts=[vertices], faces=[faces_idx])
+    target_mesh = None
 
     return target_mesh
 
@@ -33,34 +33,36 @@ def extract_radiance(model, args, device, nums):
     else:
         assert (len(nums) == 3), "Nums arg should be of length 3, number of axes for 3D"
 
-    # Create sample tiles
+    # Create sample tiles.
     tiles = [torch.linspace(-args.limit, args.limit, num) for num in nums]
 
-    # Generate 3D samples
+    # Generate 3D samples.
     samples = torch.stack(torch.meshgrid(*tiles), -1).view(-1, 3).float()
 
     radiance_samples = []
     for (samples,) in batchify(samples, batch_size=args.batch_size, device=device):
-        # Query radiance batch
+        # Query radiance batch.
         radiance_batch = model.sample_points(samples, samples)
 
-        # Accumulate radiance
+        # Accumulate radiance.
         radiance_samples.append(radiance_batch.cpu())
 
-    # Radiance 3D grid (rgb + density)
+    # Radiance 3D grid (rgb + density).
     radiance = torch.cat(radiance_samples, 0).view(*nums, 4).contiguous().numpy()
 
     return radiance
 
 
 def extract_iso_level(density, args):
+    if not args.adaptive_iso_level:
+        return args.iso_level
+
     # Density boundaries
     min_a, max_a, std_a = density.min(), density.max(), density.std()
 
     # Adaptive iso level
     iso_value = min(max(args.iso_level, min_a + std_a), max_a - std_a)
     print(f"Min density {min_a}, Max density: {max_a}, Mean density {density.mean()}")
-    print(f"Querying based on iso level: {iso_value}")
 
     return iso_value
 
@@ -74,6 +76,7 @@ def extract_geometry(model, device, args):
 
     # Adaptive iso level
     iso_value = extract_iso_level(density, args)
+    print(f"Querying based on iso level: {iso_value}")
 
     # Extracting iso-surface triangulated
     results = measure.marching_cubes(density, iso_value)
@@ -130,9 +133,8 @@ def extract_geometry_with_super_sampling(model, device, args):
 
 def export_marching_cubes(model, args, cfg, device):
     # Mesh Extraction
-
     if args.super_sampling >= 1:
-        print("Generating mesh geometry...")
+        print("Generating mesh geometry at super sampling resolution...")
 
         # Extract model geometry with super sampling across each axis
         extract_geometry_with_super_sampling(model, device, args)
@@ -150,7 +152,7 @@ def export_marching_cubes(model, args, cfg, device):
         print("Loading cached mesh geometry...")
         vertices, triangles, normals, density = torch.load(mesh_cache_path)
     else:
-        print("Generating mesh geometry...")
+        print("Generating mesh geometry (default)...")
         # Extract model geometry
         vertices, triangles, normals, density = extract_geometry(model, device, args)
 
@@ -164,41 +166,42 @@ def export_marching_cubes(model, args, cfg, device):
     targets, directions = vertices, -normals
 
     diffuse = []
-    if args.no_view_dependence:
-        print("Diffuse map query directly  without specific-views...")
-        # Query directly without specific-views
-        batch_generator = batchify(targets, directions, batch_size=args.batch_size, device=device)
-        for (pos_batch, dir_batch) in batch_generator:
-            # Diffuse batch queried
-            diffuse_batch = model.sample_points(pos_batch, dir_batch)[..., :3]
+    if not args.no_color:
+        if args.no_view_dependence:
+            print("Diffuse map query directly  without specific-views...")
+            # Query directly without specific-views
+            batch_generator = batchify(targets, directions, batch_size=args.batch_size, device=device)
+            for (pos_batch, dir_batch) in batch_generator:
+                # Diffuse batch queried
+                diffuse_batch = model.sample_points(pos_batch, dir_batch)[..., :3]
 
-            # Accumulate diffuse
-            diffuse.append(diffuse_batch.cpu())
-    else:
-        print("Diffuse map query with view dependence...")
-        ray_bounds = torch.tensor([0., args.view_disparity_max_bound], dtype=directions.dtype)
+                # Accumulate diffuse
+                diffuse.append(diffuse_batch.cpu())
+        else:
+            print("Diffuse map query with view dependence...")
+            ray_bounds = torch.tensor([0., args.view_disparity_max_bound], dtype=directions.dtype)
 
-        # Query with view dependence
-        # Move ray origins slightly towards negative sdf
-        ray_origins = targets - args.view_disparity * directions
+            # Query with view dependence
+            # Move ray origins slightly towards negative sdf
+            ray_origins = targets - args.view_disparity * directions
 
-        print("Started ray-casting")
-        batch_generator = batchify(ray_origins, directions, batch_size=args.batch_size, device=device)
-        for (ray_origins, ray_directions) in batch_generator:
-            # View dependent diffuse batch queried
-            output_bundle = model.query((ray_origins, ray_directions, ray_bounds))
+            print("Started ray-casting")
+            batch_generator = batchify(ray_origins, directions, batch_size=args.batch_size, device=device)
+            for (ray_origins, ray_directions) in batch_generator:
+                # View dependent diffuse batch queried
+                output_bundle = model.query((ray_origins, ray_directions, ray_bounds))
 
-            # Accumulate diffuse
-            diffuse.append(output_bundle.rgb_map.cpu())
+                # Accumulate diffuse
+                diffuse.append(output_bundle.rgb_map.cpu())
 
-    # Query the whole diffuse map
-    diffuse = torch.cat(diffuse, dim=0).numpy()
+        # Query the whole diffuse map
+        diffuse = torch.cat(diffuse, dim=0).numpy()
 
     # Target mesh path
     mesh_path = os.path.join(args.save_dir, args.mesh_name)
 
     # Export model
-    export_obj(vertices, triangles, diffuse, normals, mesh_path)
+    export_obj(mesh_path, vertices, triangles, normals, diffuse)
 
 
 if __name__ == "__main__":
@@ -224,6 +227,10 @@ if __name__ == "__main__":
         help="Iso-level value for triangulation",
     )
     parser.add_argument(
+        "--adaptive-iso-level", action="store_true", default=False,
+        help="Use adaptive iso-level",
+    )
+    parser.add_argument(
         "--limit", type=float, default=1.2,
         help="Limits in -xyz to xyz for marching cubes 3D grid.",
     )
@@ -240,8 +247,12 @@ if __name__ == "__main__":
         help="Higher batch size results in faster processing but needs more device memory.",
     )
     parser.add_argument(
+        "--no-color", action="store_true", default=False,
+        help="Disable vertex color generation, useful for debugging."
+    )
+    parser.add_argument(
         "--no-view-dependence", action="store_true", default=False,
-        help="Disable view dependent appearance, use sampled diffuse color based on the grid"
+        help="Disable view dependent appearance, use sampled diffuse color based on the grid."
     )
     parser.add_argument(
         "--view-disparity", type=float, default=1e-2,

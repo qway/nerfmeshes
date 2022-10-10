@@ -27,25 +27,6 @@ experiment:
   # Chamfer loss sampling size
   chamfer_sampling_size: 2400
 
-# Tree parameters.
-tree:
-  # Root subdivision power, higher requires more memory
-  subdivision_outer_count: 12
-  # Tree subdivision power, higher requires more memory
-  subdivision_inner_count: 2
-  # Max tree depth, higher requires more memory
-  max_depth: 4
-  # Threshold weight for pruning
-  eps: 0.0001
-  # Voxel random sampling instead of linearly deterministically
-  use_random_sampling: False
-  # Max tree voxels
-  max_voxel_count: 1536
-  # Step size before ticking ray batch integration (initially the scene is unresolved)
-  step_size_integration_offset: 6000
-  # Step size consolidation
-  step_size_tree: 6000
-
 # Logging parameters
 logging:
   # Use acronyms for compact logging
@@ -71,7 +52,7 @@ dataset:
   # Near clip plane (clip all depth values closer than this threshold).
   near: 0
   # Far clip plane (clip all depth values farther than this threshold).
-  far: 1.2
+  far: 1
   # Depth empty space plane.
   empty: 0.
   # Num workers.
@@ -79,7 +60,7 @@ dataset:
   # Down-sample factor for images from the LLFF dataset.
   llff_downsample_factor: 8
   # Determines the hold-out images for LLFF, step not the count.
-  llff_hold_step: 12
+  llff_hold_step: 8
   # Whether to render models using a white background (only for synthetic datasets).
   white_background: False
   # Caching parameters (works only on Blender, LLFF).
@@ -112,11 +93,11 @@ models:
     # Number of view dependent layers (-1 for no view dependence)
     num_layers_view: -1
     # Size of the hidden layers
-    hidden_size: 128
+    hidden_size: 256
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
-    # Whether or not to perform log sampling in the positional encoding
+    # Whether to perform log sampling in the positional encoding
     # of the coordinates.
     log_sampling_xyz: True
     # Number of encoding functions to use in the positional encoding
@@ -127,10 +108,10 @@ models:
     # Number of encoding functions to use in the positional encoding
     # of the direction.
     num_encoding_fn_dir: 4
-    # Whether or not to perform log sampling in the positional encoding
+    # Whether to perform log sampling in the positional encoding
     # of the direction.
     log_sampling_dir: True
-    # Additionally use viewing directions as input.
+    # Additionally, use viewing directions as input.
     use_viewdirs: True
 
   # Fine model.
@@ -149,11 +130,11 @@ models:
     # Number of view dependent layers(-1 for no view dependence)
     num_layers_view: -1
     # Size of the hidden layers
-    hidden_size: 128
+    hidden_size: 256
     # Whether to include the position (xyz) itself in its positional
     # encoding.
     include_input_xyz: True
-    # Whether or not to perform log sampling in the positional encoding
+    # Whether to perform log sampling in the positional encoding
     # of the coordinates.
     log_sampling_xyz: True
     # Number of encoding functions to use in the positional encoding
@@ -163,9 +144,9 @@ models:
     include_input_dir: True
     # Number of encoding functions to use in the positional encoding of the direction.
     num_encoding_fn_dir: 4
-    # Whether or not to perform log sampling in the positional encoding of the direction.
+    # Whether to perform log sampling in the positional encoding of the direction.
     log_sampling_dir: True
-    # Additionally use viewing directions as input.
+    # Additionally, use viewing directions as input.
     use_viewdirs: True
 
 # Optimizer params.
@@ -184,7 +165,7 @@ scheduler:
     # Multiplicative factor of learning rate decay.
     gamma: 0.1
     # Period of learning rate decay. train_iters * 180%
-    step_size: 360000
+    step_size: 270000
 
 # NeRF parameters.
 nerf:
@@ -201,29 +182,29 @@ nerf:
     num_random_rays: 2048
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
-    chunksize: 2048
-    # Whether or not to perturb the sampled depth values.
-    perturb: True
+    chunksize: 1024
+    # Whether to perturb the sampled depth values.
+    perturb: False
     # Number of depth samples per ray for the coarse network.
     num_coarse: 64
     # Number of depth samples per ray for the fine network.
-    num_fine: 64
+    num_fine: 128
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
-    radiance_field_noise_std: 0.4
+    radiance_field_noise_std: 0.2
     # Sample linearly in disparity space, as opposed to in depth space.
     lindisp: False
   # Validation-specific parameters.
   validation:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
-    chunksize: 2048
-    # Whether or not to perturb the sampled depth values.
+    chunksize: 1024
+    # Whether to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
     num_coarse: 64
     # Number of depth samples per ray for the fine network.
-    num_fine: 64
+    num_fine: 128
     # Standard deviation of noise to be added to the radiance field when
     # performing volume rendering.
     radiance_field_noise_std: 0.

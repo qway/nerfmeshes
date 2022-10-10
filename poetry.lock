@@ -166,8 +166,8 @@ python-versions = "!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*,>=2.7"
 zipp = ">=0.5"
 
 [package.extras]
-docs = ["sphinx", "rst.linker"]
-testing = ["packaging", "pep517", "importlib-resources (>=1.3)"]
+testing = ["importlib-resources (>=1.3)", "pep517", "packaging"]
+docs = ["rst.linker", "sphinx"]
 
 [[package]]
 name = "kiwisolver"
@@ -293,6 +293,17 @@ optional = false
 python-versions = ">=3.6"
 
 [[package]]
+name = "plyfile"
+version = "0.7.4"
+description = "PLY file reader/writer"
+category = "main"
+optional = false
+python-versions = "*"
+
+[package.dependencies]
+numpy = ">=1.8"
+
+[[package]]
 name = "portalocker"
 version = "2.0.0"
 description = "Wraps the portalocker recipe for easy usage"
@@ -374,12 +385,12 @@ torch = ">=1.3"
 tqdm = ">=4.41.0"
 
 [package.extras]
-all = ["neptune-client (>=0.4.109)", "comet-ml (>=3.1.12)", "mlflow (>=1.0.0)", "test-tube (>=0.7.5)", "wandb (>=0.8.21)", "matplotlib (>=3.1.1)", "horovod (>=0.19.2)", "omegaconf (>=2.0.0)", "scikit-learn (>=0.22.2)", "torchtext (>=0.3.1,<0.7)", "onnx (>=1.7.0)", "onnxruntime (>=1.3.0)", "coverage", "codecov (>=2.1)", "pytest (>=3.0.5)", "pytest-cov", "pytest-flake8", "flake8", "flake8-black", "check-manifest", "twine (==1.13.0)", "scikit-image", "black (==19.10b0)", "pre-commit (>=1.0)", "cloudpickle (>=1.2)", "nltk (>=3.3)", "torchvision (>=0.4.0,<0.7)", "gym (>=0.17.0)", "sphinx (>=2.0,<3.0)", "recommonmark", "m2r", "nbsphinx", "pandoc", "docutils", "sphinxcontrib-fulltoc", "sphinxcontrib-mockautodoc", "sphinx-autodoc-typehints", "sphinx-paramlinks (<0.4.0)", "sphinx-togglebutton", "sphinx-copybutton"]
-dev = ["neptune-client (>=0.4.109)", "comet-ml (>=3.1.12)", "mlflow (>=1.0.0)", "test-tube (>=0.7.5)", "wandb (>=0.8.21)", "matplotlib (>=3.1.1)", "horovod (>=0.19.2)", "omegaconf (>=2.0.0)", "scikit-learn (>=0.22.2)", "torchtext (>=0.3.1,<0.7)", "onnx (>=1.7.0)", "onnxruntime (>=1.3.0)", "coverage", "codecov (>=2.1)", "pytest (>=3.0.5)", "pytest-cov", "pytest-flake8", "flake8", "flake8-black", "check-manifest", "twine (==1.13.0)", "scikit-image", "black (==19.10b0)", "pre-commit (>=1.0)", "cloudpickle (>=1.2)", "nltk (>=3.3)"]
-docs = ["sphinx (>=2.0,<3.0)", "recommonmark", "m2r", "nbsphinx", "pandoc", "docutils", "sphinxcontrib-fulltoc", "sphinxcontrib-mockautodoc", "sphinx-autodoc-typehints", "sphinx-paramlinks (<0.4.0)", "sphinx-togglebutton", "sphinx-copybutton"]
-examples = ["torchvision (>=0.4.0,<0.7)", "gym (>=0.17.0)"]
-extra = ["neptune-client (>=0.4.109)", "comet-ml (>=3.1.12)", "mlflow (>=1.0.0)", "test-tube (>=0.7.5)", "wandb (>=0.8.21)", "matplotlib (>=3.1.1)", "horovod (>=0.19.2)", "omegaconf (>=2.0.0)", "scikit-learn (>=0.22.2)", "torchtext (>=0.3.1,<0.7)", "onnx (>=1.7.0)", "onnxruntime (>=1.3.0)"]
-test = ["coverage", "codecov (>=2.1)", "pytest (>=3.0.5)", "pytest-cov", "pytest-flake8", "flake8", "flake8-black", "check-manifest", "twine (==1.13.0)", "scikit-image", "black (==19.10b0)", "pre-commit (>=1.0)", "cloudpickle (>=1.2)", "nltk (>=3.3)"]
+test = ["nltk (>=3.3)", "cloudpickle (>=1.2)", "pre-commit (>=1.0)", "black (==19.10b0)", "scikit-image", "twine (==1.13.0)", "check-manifest", "flake8-black", "flake8", "pytest-flake8", "pytest-cov", "pytest (>=3.0.5)", "codecov (>=2.1)", "coverage"]
+extra = ["onnxruntime (>=1.3.0)", "onnx (>=1.7.0)", "torchtext (>=0.3.1,<0.7)", "scikit-learn (>=0.22.2)", "omegaconf (>=2.0.0)", "horovod (>=0.19.2)", "matplotlib (>=3.1.1)", "wandb (>=0.8.21)", "test-tube (>=0.7.5)", "mlflow (>=1.0.0)", "comet-ml (>=3.1.12)", "neptune-client (>=0.4.109)"]
+examples = ["gym (>=0.17.0)", "torchvision (>=0.4.0,<0.7)"]
+docs = ["sphinx-copybutton", "sphinx-togglebutton", "sphinx-paramlinks (<0.4.0)", "sphinx-autodoc-typehints", "sphinxcontrib-mockautodoc", "sphinxcontrib-fulltoc", "docutils", "pandoc", "nbsphinx", "m2r", "recommonmark", "sphinx (>=2.0,<3.0)"]
+dev = ["nltk (>=3.3)", "cloudpickle (>=1.2)", "pre-commit (>=1.0)", "black (==19.10b0)", "scikit-image", "twine (==1.13.0)", "check-manifest", "flake8-black", "flake8", "pytest-flake8", "pytest-cov", "pytest (>=3.0.5)", "codecov (>=2.1)", "coverage", "onnxruntime (>=1.3.0)", "onnx (>=1.7.0)", "torchtext (>=0.3.1,<0.7)", "scikit-learn (>=0.22.2)", "omegaconf (>=2.0.0)", "horovod (>=0.19.2)", "matplotlib (>=3.1.1)", "wandb (>=0.8.21)", "test-tube (>=0.7.5)", "mlflow (>=1.0.0)", "comet-ml (>=3.1.12)", "neptune-client (>=0.4.109)"]
+all = ["sphinx-copybutton", "sphinx-togglebutton", "sphinx-paramlinks (<0.4.0)", "sphinx-autodoc-typehints", "sphinxcontrib-mockautodoc", "sphinxcontrib-fulltoc", "docutils", "pandoc", "nbsphinx", "m2r", "recommonmark", "sphinx (>=2.0,<3.0)", "gym (>=0.17.0)", "torchvision (>=0.4.0,<0.7)", "nltk (>=3.3)", "cloudpickle (>=1.2)", "pre-commit (>=1.0)", "black (==19.10b0)", "scikit-image", "twine (==1.13.0)", "check-manifest", "flake8-black", "flake8", "pytest-flake8", "pytest-cov", "pytest (>=3.0.5)", "codecov (>=2.1)", "coverage", "onnxruntime (>=1.3.0)", "onnx (>=1.7.0)", "torchtext (>=0.3.1,<0.7)", "scikit-learn (>=0.22.2)", "omegaconf (>=2.0.0)", "horovod (>=0.19.2)", "matplotlib (>=3.1.1)", "wandb (>=0.8.21)", "test-tube (>=0.7.5)", "mlflow (>=1.0.0)", "comet-ml (>=3.1.12)", "neptune-client (>=0.4.109)"]
 
 [[package]]
 name = "pytorch3d"
@@ -394,8 +405,8 @@ fvcore = "*"
 torchvision = ">=0.4"
 
 [package.extras]
-all = ["matplotlib", "tqdm (>4.29.0)", "imageio", "ipywidgets"]
-dev = ["flake8", "isort", "black (==19.3b0)"]
+dev = ["black (==19.3b0)", "isort", "flake8"]
+all = ["ipywidgets", "imageio", "tqdm (>4.29.0)", "matplotlib"]
 
 [[package]]
 name = "pywavelets"
@@ -633,8 +644,8 @@ optional = false
 python-versions = ">=2.7, !=3.0.*, !=3.1.*, !=3.2.*, !=3.3.*, !=3.4.*"
 
 [package.extras]
-dev = ["pytest", "pytest-timeout", "coverage", "tox", "sphinx", "pallets-sphinx-themes", "sphinx-issues"]
 watchdog = ["watchdog"]
+dev = ["sphinx-issues", "pallets-sphinx-themes", "sphinx", "tox", "coverage", "pytest-timeout", "pytest"]
 
 [[package]]
 name = "yacs"
@@ -662,7 +673,7 @@ testing = ["pytest (>=3.5,!=3.7.3)", "pytest-checkdocs (>=1.2.3)", "pytest-flake
 [metadata]
 lock-version = "1.1"
 python-versions = "^3.7"
-content-hash = "e100124ecf34e5d4fdd8c9803db219eb145f04cfd1d37b7b16373f537faaf90a"
+content-hash = "288ee12797c268f59041666dd7f60dcdd53bd71779cb51d810882e884fe4ecbb"
 
 [metadata.files]
 absl-py = [
@@ -892,6 +903,10 @@ pillow = [
     {file = "Pillow-8.0.0-pp36-pypy36_pp73-win32.whl", hash = "sha256:e674be2f349ea810e221b0113bd4491f53584ac848d5bcc3b62443cfa11d9c40"},
     {file = "Pillow-8.0.0-pp37-pypy37_pp73-win32.whl", hash = "sha256:d6766fd28f4f47cf93280a57e3dc6a9d11bdada1a6e9f019b8c62b12bbc86f6a"},
     {file = "Pillow-8.0.0.tar.gz", hash = "sha256:59304c67d12394815331eda95ec892bf54ad95e0aa7bc1ccd8e0a4a5a25d4bf3"},
+]
+plyfile = [
+    {file = "plyfile-0.7.4-py3-none-any.whl", hash = "sha256:155cdd6033451921203dd050d0a6fded3e4ba9cea5a18a4f64fe06bbc2d0cc3c"},
+    {file = "plyfile-0.7.4.tar.gz", hash = "sha256:9e9a18d22a3158fcd74df38761d43a7facc6df75126f2ab9f4e9a5d4d2188652"},
 ]
 portalocker = [
     {file = "portalocker-2.0.0-py2.py3-none-any.whl", hash = "sha256:5d7bc386d785dfc87e763a29d7d5864556c62653379e3ff484c71e49425d1898"},

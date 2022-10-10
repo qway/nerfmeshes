@@ -44,7 +44,7 @@ models:
     skip_step: 4
     # Number of encoding functions to use (Eg. in positional encoding).
     num_encoding_functions: 6
-    # Additionally use viewing directions as input.
+    # Additionally, use viewing directions as input.
     use_viewdirs: True
   fine:
     # Name of the torch.nn.Module class that implements the model.
@@ -59,7 +59,7 @@ models:
     skip_step: 4
     # Number of encoding functions to use (Eg. in positional encoding).
     num_encoding_functions: 6
-    # Additionally use viewing directions as input.
+    # Additionally, use viewing directions as input.
     use_viewdirs: True
 
 # Optimizer params.
@@ -91,7 +91,7 @@ nerf:
     # Size of each chunk (rays are batched into "chunks" and passed through
     # the network)
     chunksize: 8
-    # Whether or not to perturb the sampled depth values.
+    # Whether to perturb the sampled depth values.
     perturb: True
     # Number of depth samples per ray for the coarse network.
     num_coarse: 8
@@ -109,7 +109,7 @@ nerf:
     # Number of random rays to retain from each image.
     # These sampled rays are used for training, and the others are discarded.
     chunksize: 8
-    # Whether or not to perturb the sampled depth values.
+    # Whether to perturb the sampled depth values.
     perturb: False
     # Number of depth samples per ray for the coarse network.
     num_coarse: 8

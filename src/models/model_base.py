@@ -2,10 +2,10 @@ import torch
 import pytorch_lightning as pl
 
 # git+https://github.com/facebookresearch/pytorch3d.git@stable
-from pytorch3d.ops import sample_points_from_meshes
-from pytorch3d.loss import chamfer_distance
+# from pytorch3d.ops import sample_points_from_meshes
+# from pytorch3d.loss import chamfer_distance
 from torch.utils.tensorboard import SummaryWriter
-from mesh_nerf import extract_geometry, create_mesh
+# from mesh_nerf import extract_geometry, create_mesh
 from torch.optim.lr_scheduler import LambdaLR
 from abc import abstractmethod
 from torch.utils.data import DataLoader
@@ -84,22 +84,22 @@ class BaseModel(pl.LightningModule):
             assert self.val_dataset.target_mesh is not None, "To compute the " \
                 "chamfer loss, a target mesh .obj must be provided in the dataset folder"
 
-            # Target model to query based on the grid
-            model = self.get_model()
-
-            # Read the input 3D model
-            vertices, faces, _, _, _, _ = extract_geometry(model, self.device, None)
-
-            # We construct a Meshes structure for the target mesh
-            input_mesh = create_mesh(vertices, faces)
-
-            # Sparse sampling
-            target_samples = sample_points_from_meshes(self.val_dataset.target_mesh,
-                                                       self.cfg.experiment.chamfer_sampling_size)
-            input_samples = sample_points_from_meshes(input_mesh, self.cfg.experiment.chamfer_sampling_size)
-
-            chamfer_loss, _ = chamfer_distance(target_samples, input_samples)
-            log_mean["log"]["validation/chamfer_loss"] = chamfer_loss
+            # # Target model to query based on the grid
+            # model = self.get_model()
+            #
+            # # Read the input 3D model
+            # vertices, faces, _, _, _, _ = extract_geometry(model, self.device, None)
+            #
+            # # We construct a Meshes structure for the target mesh
+            # input_mesh = create_mesh(vertices, faces)
+            #
+            # # Sparse sampling
+            # target_samples = sample_points_from_meshes(self.val_dataset.target_mesh,
+            #                                            self.cfg.experiment.chamfer_sampling_size)
+            # input_samples = sample_points_from_meshes(input_mesh, self.cfg.experiment.chamfer_sampling_size)
+            #
+            # chamfer_loss, _ = chamfer_distance(target_samples, input_samples)
+            # log_mean["log"]["validation/chamfer_loss"] = chamfer_loss
 
         return log_mean
 

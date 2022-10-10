@@ -23,6 +23,7 @@ pytorch3d = "^0.2.5"
 pytorch-lightning = "^0.9.0"
 scikit-image = "^0.17.2"
 tqdm = "^4.46.0"
+plyfile = "^0.7.4"
 
 [tool.poetry.dev-dependencies]
 
