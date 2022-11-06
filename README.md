@@ -61,6 +61,8 @@ In the root folder, run the script considering the dataset folder is named data/
 
 ## Data
 
+Before getting started, if the final objective is mesh extraction, follow the [Thread](https://github.com/qway/nerfmeshes/issues/18) and find out if it's feasible based on the checklist.    
+
 #### Synthetic dataset and LLFF
 
 Checkout the provided data links [NeRF Original](https://github.com/bmild/nerf).
